@@ -1,0 +1,13 @@
+{
+  "name": "Kneipen-Schlägerei",
+  "short_name": "Kneipe",
+  "description": "Seelenfick für die Kneipe. 🍺",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0a",
+  "theme_color": "#d4a850",
+  "icons": [
+    {"src": "/app-icon-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "/app-icon-512.png", "sizes": "512x512", "type": "image/png"}
+  ]
+}

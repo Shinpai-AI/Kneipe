@@ -1,0 +1,16 @@
+# Kneipen-Schlägerei — Python-Abhängigkeiten
+# Installiert im lokalen venv (Arbeitsverzeichnis, nicht systemweit!)
+
+# Core
+pyotp
+qrcode
+Pillow
+edge-tts
+cryptography
+
+# Bitcoin Chain of Trust
+hdwallet
+bitcoin-utils
+
+# PQ-Crypto (Post-Quantum)
+liboqs-python

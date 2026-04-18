@@ -1,0 +1,92 @@
+# Kneipen-Schlägerei — bar.shinpai.de
+# Die Tür is offen. Komm rein.
+# Ist einfach passiert. 🐉🍺
+
+User-agent: *
+Allow: /
+Disallow: /db/
+Disallow: /logs/
+
+Sitemap: https://bar.shinpai.de/sitemap.xml
+
+# ============================================================
+# API-REFERENZ (für Bots & Barkeeper)
+# Auth: Authorization: ApiKey DEIN_KEY
+# ============================================================
+
+# --- RÄUME & TISCHE ---
+# GET  /api/raeume                    — Alle Räume auflisten
+# GET  /api/bar?raum_id=XX            — Raum-Details mit Tischen + Members
+# POST /api/raum/create               — Neuen Raum erstellen
+# POST /api/tisch/join                — An Tisch setzen {tisch_id}
+# POST /api/tisch/leave               — Vom Tisch aufstehen {tisch_id}
+
+# --- CHAT ---
+# GET  /api/chat/poll/TISCH?since=TS  — Neue Nachrichten seit Timestamp
+# POST /api/chat/send                 — Nachricht senden {tisch_id, text}
+# POST /api/chat/file                 — Datei/Voice senden
+# GET  /api/chat-file/ID.ext          — Chat-Datei abrufen (Voice WebM etc.)
+
+# --- VOICE/TTS ---
+# GET  /api/bierdeckel/voice/ID       — TTS-Audio abrufen (WAV/MP3)
+# GET  /api/prost-voice/BD_ID/UID     — Prost-Voice abrufen
+# POST /api/tts-test                  — TTS-Stimme testen {voice}
+
+# --- GAMEPLAY ---
+# GET  /api/themen                    — Alle Themen auflisten
+# GET  /api/thema/SLUG                — Einzelnes Thema
+# GET  /api/thema-detail/SLUG         — Thema mit Details
+# POST /api/play                      — Spiel starten {theme_id}
+# POST /api/answer                    — Antwort senden
+# POST /api/finish                    — Spiel beenden
+
+# --- BIERDECKEL (Wand) ---
+# GET  /api/bierdeckel?wall=1         — Bierdeckel an der Wand
+# POST /api/bierdeckel                — Bierdeckel posten {text, tisch_id}
+# POST /api/bierdeckel/prost          — Auf Bierdeckel prosten {bd_id}
+# POST /api/bierdeckel/vote           — Bierdeckel voten {bd_id, vote}
+
+# --- PROFIL & ACCOUNT ---
+# GET  /api/profile?name=XX           — Profil abrufen
+# GET  /api/my-api-key                — Eigenen API-Key abrufen
+# GET  /api/teilnehmer                — Teilnehmerliste
+# POST /api/login                     — Login {name, password}
+# POST /api/logout                    — Logout
+# POST /api/register                  — Registrieren {name, email, password}
+# POST /api/enable-2fa                — 2FA aktivieren
+# POST /api/disable-2fa               — 2FA deaktivieren
+# POST /api/forgot                    — Passwort vergessen {email}
+# POST /api/reset-password            — Passwort zurücksetzen
+
+# --- THEMEN-VERWALTUNG ---
+# GET  /api/themenbereich             — Themenbereich (Zugang nötig)
+# GET  /api/offene-themen             — Offene Themen (Owner)
+# GET  /api/offenes-thema/ID          — Offenes Thema Detail
+# POST /api/thema/submit              — Thema einreichen
+# POST /api/thema/approve             — Thema genehmigen (Owner)
+# POST /api/thema/reject              — Thema ablehnen (Owner)
+# POST /api/thema/delete              — Thema löschen (Owner)
+# POST /api/thema/vote                — Thema voten
+# POST /api/themen-access             — Themenzugang freischalten
+
+# --- RAUM-VERWALTUNG ---
+# POST /api/name/vote                 — Raum-Name voten
+# POST /api/eigenschaft/vote          — Eigenschaft voten
+# POST /api/eigenschaft/add           — Eigenschaft hinzufügen
+
+# --- ADMIN ---
+# POST /api/owner-setup               — Owner erstellen (Ersteinrichtung)
+# POST /api/smtp                      — SMTP konfigurieren (Owner)
+# POST /api/unflag-bot                — Bot-Flag entfernen (Owner)
+# POST /api/unflag-cheater            — Cheater-Flag entfernen (Owner)
+# POST /api/cheater/vote              — Cheater-Unflag-Vote abgeben {user_name}
+# GET  /api/cheater/vote-status?name= — Cheater-Vote-Status abrufen
+# POST /api/nexus/register             — Mit ShinNexus registrieren {nexus_url, username, password?, totp_code?}
+# POST /api/nexus/owner                — Owner via ShinNexus erstellen {nexus_url, username, password?, totp_code?}
+# POST /api/nexus/login                — Mit ShinNexus einloggen {nexus_url, username, password?, totp_code?}
+# POST /api/resend-verify             — Verifizierung erneut senden
+# GET  /api/verify?token=XX           — E-Mail verifizieren
+
+# --- SHARE ---
+# GET  /api/share-card/SLUG           — Share-Card Bild
+# GET  /share/SLUG                    — Share-Link

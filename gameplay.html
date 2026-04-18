@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kneipen-Schlägerei — Gameplay</title>
+<link rel="icon" href="intro.jpg">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: linear-gradient(rgba(10,10,10,0.88), rgba(10,10,10,0.88)), url('intro.jpg') center center / cover no-repeat fixed;
+  color: #e0d8c8; font-family: 'Georgia', serif; padding: 20px; max-width: 700px; margin: 0 auto; line-height: 1.7;
+}
+h1 { color: #d4a850; font-size: 28px; text-align: center; margin-bottom: 5px; }
+h2 { color: #d4a850; font-size: 18px; margin-top: 25px; border-bottom: 1px solid #3a3020; padding-bottom: 5px; }
+h3 { color: #c0a060; font-size: 14px; margin-top: 15px; }
+p, li { font-size: 13px; margin: 5px 0; color: #c8c0b0; }
+ul { padding-left: 20px; }
+a { color: #d4a850; }
+table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+th { color: #d4a850; text-align: left; padding: 4px 8px; border-bottom: 1px solid #3a3020; font-size: 12px; }
+td { padding: 4px 8px; border-bottom: 1px solid #2a2015; font-size: 12px; color: #c8c0b0; }
+.back { display: inline-block; margin: 20px 0; color: #d4a850; text-decoration: none; font-size: 14px; }
+.footer { text-align: center; margin-top: 30px; opacity: 0.3; font-size: 11px; }
+.hacker-section { margin-top: 60px; padding-top: 20px; border-top: 1px solid #1a1610; }
+.hacker-title { font-size: 6px; color: #2a2015; }
+.hacker-text { font-size: 4px; color: #1a1610; line-height: 1.4; }
+.hacker-text p { font-size: 4px; margin: 1px 0; color: #1a1610; }
+</style>
+</head>
+<body>
+
+<a href="/" class="back">&larr; Zurück zum Spiel</a>
+
+<h1>🍺 Kneipen-Schlägerei</h1>
+<p style="text-align:center;opacity:0.5;font-size:12px;">Version 1.0 — Seelenfick für die Kneipe</p>
+
+<h2>🏠 Die Kneipe</h2>
+<p>Mehr als ein Spiel. Eine Plattform für ehrliche Gespräche, Schwafeln und Seelenfick. Hier sitzt du an Tischen, redest mit Leuten und wirst dafür belohnt wer du bist — nicht was du leistest.</p>
+
+<h3>🚪 Räume &amp; Tische</h3>
+<p>Die Kneipe hat mehrere Räume, jeder mit eigenen Eigenschaften (Musik, 18+, Nerdy, etc.). In jedem Raum stehen Tische. Jeder Tisch hat ein Thema und eine Energie. Setz dich hin, rede, steh wieder auf.</p>
+
+<h3>🔒 Tisch-Passwort</h3>
+<p>Jeder der an einem Tisch sitzt kann ein Passwort setzen. Wer danach dazukommen will muss das Passwort kennen. Privatsphäre wenn du sie brauchst. Ohne Passwort: offen für alle.</p>
+
+<h3>🔊 Voice</h3>
+<p>Nachrichten werden optional vorgelesen. Der Besitzer steuert ob Voice aktiv ist und welche Stimme verwendet wird. Orpheus (menschlich, braucht GPU) oder Edge-TTS (Roboter, braucht nichts).</p>
+
+<h3>🛡️ ShinNexus Verbindung</h3>
+<p>Optional: verbinde deinen Account mit einem ShinNexus für Identitätsverifikation. Dein Profil-Shield zeigt deinen Verifikationsstatus — von nicht verbunden bis amtlich bestätigt mit Regenbogen-Glow.</p>
+<p>Stufen: Nicht verbunden → Verbunden → 18+ (Kreditkarte) → Verifiziert (Perso) → Amtlich bestätigt (Amt-Lizenzen).</p>
+
+<h2>🎮 Das Spiel</h2>
+<p>Du sitzt in einer Kneipe. Jemand sagt was. Du reagierst. Oder nicht. Jede Entscheidung zeigt wer du bist.</p>
+<p>30 Themen. 5 Schichten Tiefe. 3 Wege pro Schicht. Alle Wege führen zu einer Erkenntnis — aber DEIN Weg dahin sagt was über dich.</p>
+
+<h2>🔥 Elemente</h2>
+<p>Nach jedem Thema bekommst du ein Element:</p>
+<table>
+  <tr><th>Element</th><th>Bedeutung</th></tr>
+  <tr><td>🔥 Feuer</td><td>Du konfrontierst, hinterfragst, provozierst</td></tr>
+  <tr><td>🌊 Wasser</td><td>Du fließt mit, begleitest, verbindest</td></tr>
+  <tr><td>🪨 Stein</td><td>Du schweigst bewusst, beobachtest, wartest</td></tr>
+  <tr><td>💨 Wind</td><td>Unberechenbar, kein Schema, überraschend</td></tr>
+  <tr><td>🌸 Mauerblümchen</td><td>Du schweigst aus Angst, nicht aus Weisheit</td></tr>
+</table>
+
+<h2>👑 Gesamt-Titel</h2>
+<table>
+  <tr><th>Titel</th><th>Wann</th></tr>
+  <tr><td>Kritiker</td><td>75%+ deiner Spiele enden als Feuer</td></tr>
+  <tr><td>Denker</td><td>Keine klare Mehrheit — du bist flexibel</td></tr>
+  <tr><td>Mystiker</td><td>75%+ deiner Spiele enden als Stein</td></tr>
+  <tr><td>Mauerblümchen</td><td>Nur wenn kein anderer Titel + alle Mauerblümchen-Trigger</td></tr>
+</table>
+
+<h2>🏅 Sammeltitel</h2>
+<table>
+  <tr><th>Titel</th><th>Trigger</th></tr>
+  <tr><td>🔥 Brandstifter</td><td>5x Feuer als Ergebnis</td></tr>
+  <tr><td>🌊 Flussbett</td><td>5x Wasser als Ergebnis</td></tr>
+  <tr><td>🪨 Stammtischgast</td><td>5x Stein als Ergebnis</td></tr>
+  <tr><td>🤯 Chaot</td><td>5x Wind als Ergebnis</td></tr>
+  <tr><td>🤐 Maulwurf</td><td>3 Themen am Stück nur geschwiegen</td></tr>
+  <tr><td>🎵 Jukebox-Held</td><td>5x Schweigen mit Handlung</td></tr>
+  <tr><td>🐑 Ja-Sager</td><td>5x Zustimmung wo Konfrontation passt</td></tr>
+  <tr><td>🌸 Mauerblümchen</td><td>3x bei direkter Frage falsch geschwiegen</td></tr>
+  <tr><td>🌙 Nachtmensch</td><td>75% der Spiele nach Mitternacht</td></tr>
+</table>
+
+<h2>🍺 Stammgast</h2>
+<p>Es gibt versteckte Stammgast-Events. Du weißt DASS sie existieren. Aber nicht WO und nicht WIE.</p>
+<p>Sammle sie. Derzeit sind mehrere möglich. Mit neuen Themen kommen neue Events.</p>
+
+<h2>🏆 Teilnehmer-Liste</h2>
+<p>Sortiert nach Titel-Anzahl (mehr = besser). Bei gleichen Titeln: weniger Spiele = effizienter = höher.</p>
+<p>Es gibt keinen Score. Nur deine Persönlichkeit.</p>
+<table>
+  <tr><th>Rang</th><th>Symbol</th></tr>
+  <tr><td>Platz 1</td><td>🏆</td></tr>
+  <tr><td>Platz 2</td><td>🥈</td></tr>
+  <tr><td>Platz 3</td><td>🤠</td></tr>
+  <tr><td>Letzter Platz</td><td>💀</td></tr>
+</table>
+
+<h2>⚖️ Cheater-Erkennung & Tribunal</h2>
+<p>Titel werden gewogen, nicht nur gezählt. 5x Feuer bei 100 Spielen wiegt schwerer als 5x Feuer bei 5 Spielen. Dein Sharebild zeigt das Verhältnis.</p>
+<p>Wer alle Titel in verdächtig wenigen Spielen sammelt, wird automatisch geflaggt. Aber die Kneipe ist fair:</p>
+<ul>
+  <li>💀 <strong>Cheater-Flag</strong> — Automatisch bei suspektem Titel-Tempo</li>
+  <li>⚖️ <strong>Tribunal</strong> — Einspruch einreichen, Community stimmt ab</li>
+  <li>📅 <strong>31 Tage</strong> Abstimmungsfrist</li>
+  <li>✅ <strong>80%+ Verzeihen</strong> = Unflag (zweite Chance!)</li>
+  <li>🚩 <strong>&lt;80%</strong> = Bleibt geflaggt (Pech gehabt)</li>
+  <li>⏳ <strong>180 Tage Cooldown</strong> bis erneuter Einspruch</li>
+</ul>
+<p>Jeder verifizierte Account = 1 Stimme. Die Kneipe regelt das unter sich.</p>
+
+<h2>🔐 Account & Sicherheit</h2>
+<ul>
+  <li>Passwort: PBKDF2-SHA256 gehasht (nicht rekonstruierbar)</li>
+  <li>2FA: Optional (TOTP, empfohlen)</li>
+  <li>Email: Nur für Verifizierung, nicht öffentlich sichtbar</li>
+  <li>Account löschen: Sofort, komplett, irreversibel</li>
+  <li>Passwort vergessen: Reset per Email (3 Tage gültig, 1x/Tag/IP)</li>
+</ul>
+
+<h2>📋 Themenbereich</h2>
+<p>Ab 100 Spielen freigeschaltet. Dort kannst du:</p>
+<ul>
+  <li>Gespielte Themen komplett einsehen</li>
+  <li>Eigene Themen erstellen und einreichen</li>
+  <li>Über offene Themen abstimmen (Like/Dislike)</li>
+</ul>
+<p>Der Owner entscheidet welche Themen ins Spiel kommen.</p>
+
+<h2>🌍 Für wen?</h2>
+<p>Für jeden der bereit ist in einer virtuellen Kneipe ehrliche Gespräche zu führen. Kein Alter, keine Voraussetzung, nur Mut.</p>
+<p>Gefällt dir nicht? 11. Gebot.</p>
+
+<h2>📬 Kontakt</h2>
+<p>Support, Fragen, Feedback: <a href="mailto:info@shinpai.de">info@shinpai.de</a></p>
+<p>Score löschen, Account-Probleme: Direkt im Profil oder per Mail.</p>
+
+<div class="footer">
+  <a href="https://shinpai.de/pages/impressum.html">Impressum</a> ·
+  <a href="https://shinpai.de/pages/datenschutz.html">Datenschutz</a> ·
+  <a href="https://shinpai.de">Shinpai-AI</a>
+  <br>Shinpai Games v1.0 — Ist einfach passiert. 🐉
+</div>
+
+<!-- HACKER PARAGRAPH -->
+<div class="hacker-section">
+<div class="hacker-title">§ Transparenzklausel — Sicherheitsarchitektur</div>
+<div class="hacker-text">
+<p>Kneipen-Schlägerei verwendet PBKDF2-SHA256 mit 100.000 Iterationen und zufälligem Salt für Passwort-Hashing. Passwörter sind nicht rekonstruierbar. Sessions werden als zufällige 256-Bit Tokens im Serverprozess gehalten mit 24h Timeout. TOTP (RFC 6238) mit ±1 Zeitfenster-Toleranz für 2FA. Rate-Limiting: 60 API-Requests pro IP pro Minute. CORS auf erlaubte Origins beschränkt. Alle Datenbankabfragen parameterisiert (kein SQL-Injection). User-Inputs werden als textContent gerendert (kein innerHTML, kein XSS). Reset-Tokens: 3-Tage-Ablauf, Einmal-Nutzung, 1 Reset pro IP pro 24h, 3 Resets in 3 Tagen = 14-Tage Email-Sperre. SMTP über Port 587 STARTTLS. HTTPS via Caddy mit Let's Encrypt Auto-TLS. Community-Themen durchlaufen Owner-Approval. Abstimmung: 1 Vote pro Account. Teilnehmer-Daten (Email) nur für Owner sichtbar. Account-Löschung: sofort, komplett, irreversibel, beide Datenbanken, DSGVO-konform.</p>
+<p>Ja, der Quellcode ist einsehbar. Ja, die API-Endpoints sind bekannt. Nein, du kannst damit keinen Account übernehmen. Außer du hackst die Email des Besitzers — und dann hast du größere Probleme als ein Kneipe-Game. In diesem Sinne: Prost. 🍺</p>
+</div>
+</div>
+
+<!-- EASTER EGGS — Schwarz auf Schwarz -->
+<div style="margin-top:40px;background:#0a0a0a;padding:20px;border-radius:8px;">
+<div style="font-size:4px;color:#0b0b0b;line-height:1.4;">
+<p style="font-size:4px;color:#0b0b0b;">§ Easter Eggs — Du hast es bis hierher geschafft.</p>
+<p style="font-size:4px;color:#0b0b0b;">Easter Egg 1: STAMMGAST. In bestimmten Themen kannst du durch konsequentes Schweigen den Stammgast-Status erreichen. Welche Themen? Finde es heraus. Wie viele gibt es? Das verraten wir nicht. Aber es werden mehr.</p>
+<p style="font-size:4px;color:#0b0b0b;">Easter Egg 2: Es gibt einen Titel der NIRGENDS dokumentiert ist. Nicht hier. Nicht im Spiel. Nur im Code. Wer ihn findet hat entweder alles erreicht oder alles gelesen. Beides verdient Respekt.</p>
+<p style="font-size:4px;color:#0b0b0b;">Easter Egg 3: Du liest gerade schwarzen Text auf schwarzem Hintergrund auf der Gameplay-Seite eines philosophischen Kneipe-Games das an einem Sonntag in Berlin-Lichtenberg entstanden ist. Ist einfach passiert. 🐉</p>
+</div>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+db/
+vault/
+credentials/
+Kneipe-Igni*/
+logs/
+voices/
+venv/
+.server.pid
+themen_json/
