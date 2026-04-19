@@ -1,0 +1,121 @@
+name: Build Installers
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install appimagetool
+        run: |
+          wget -q -O appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+          chmod +x appimagetool
+
+      - name: Build AppImage
+        run: |
+          mkdir -p Kneipe.AppDir/usr/share/kneipe
+          # Copy app files
+          cp server.py index.html requirements.txt start.sh converter.py kneipe-tray.py Kneipe.AppDir/usr/share/kneipe/ 2>/dev/null || true
+          cp -r Themen badges Kneipe.AppDir/usr/share/kneipe/ 2>/dev/null || true
+          cp *.png *.ico *.jpg *.json *.xml *.js *.mp3 *.html *.webp Kneipe.AppDir/usr/share/kneipe/ 2>/dev/null || true
+          # AppDir structure
+          cp installer/linux/AppRun Kneipe.AppDir/AppRun
+          chmod +x Kneipe.AppDir/AppRun
+          cp installer/linux/kneipe.desktop Kneipe.AppDir/
+          cp app-icon-512.png Kneipe.AppDir/kneipe.png 2>/dev/null || true
+          ln -sf kneipe.png Kneipe.AppDir/.DirIcon
+          # Build
+          ARCH=x86_64 ./appimagetool --no-appstream Kneipe.AppDir Kneipe-x86_64.AppImage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Kneipe-Linux-AppImage
+          path: Kneipe-x86_64.AppImage
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Create Windows Installer
+        shell: pwsh
+        run: |
+          # Create installer directory
+          New-Item -ItemType Directory -Path "installer-build" -Force
+          # Copy app files
+          Copy-Item "server.py","index.html","requirements.txt","start.sh","converter.py","kneipe-tray.py" -Destination "installer-build/" -ErrorAction SilentlyContinue
+          Copy-Item -Path "Themen","badges" -Destination "installer-build/" -Recurse -ErrorAction SilentlyContinue
+          Copy-Item "*.png","*.ico","*.jpg","*.json","*.xml","*.js","*.mp3","*.html","*.webp" -Destination "installer-build/" -ErrorAction SilentlyContinue
+          # Create Inno Setup script
+          Copy-Item "installer/windows/kneipe-setup.iss" -Destination "." -ErrorAction SilentlyContinue
+
+      - name: Build with Inno Setup
+        uses: Minionguyjpro/Inno-Setup-Action@v1.2.4
+        with:
+          path: kneipe-setup.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Kneipe-Windows-Setup
+          path: Output/*.exe
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Create macOS App Bundle
+        run: |
+          APP="Kneipe.app"
+          mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/Resources"
+          # Copy app files
+          cp server.py index.html requirements.txt start.sh converter.py kneipe-tray.py "$APP/Contents/Resources/" 2>/dev/null || true
+          cp -r Themen badges "$APP/Contents/Resources/" 2>/dev/null || true
+          cp *.png *.ico *.jpg *.json *.xml *.js *.mp3 *.html *.webp "$APP/Contents/Resources/" 2>/dev/null || true
+          # Create launcher
+          cp installer/macos/kneipe-launcher.sh "$APP/Contents/MacOS/Kneipe"
+          chmod +x "$APP/Contents/MacOS/Kneipe"
+          # Info.plist
+          cp installer/macos/Info.plist "$APP/Contents/"
+          # Icon
+          cp installer/macos/kneipe.icns "$APP/Contents/Resources/" 2>/dev/null || true
+          # Create DMG
+          hdiutil create -volname "Kneipe" -srcfolder "$APP" -ov -format UDZO Kneipe-macOS.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Kneipe-macOS-DMG
+          path: Kneipe-macOS.dmg
+
+  release:
+    needs: [build-linux, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Kneipe-Linux-AppImage/Kneipe-x86_64.AppImage
+            Kneipe-Windows-Setup/*.exe
+            Kneipe-macOS-DMG/Kneipe-macOS.dmg
+          generate_release_notes: true

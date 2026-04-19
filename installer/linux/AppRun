@@ -1,0 +1,87 @@
+#!/bin/bash
+HERE="$(dirname "$(readlink -f "$0")")"
+KNEIPE_SRC="$HERE/usr/share/kneipe"
+DEFAULT_DIR="$HOME/.local/share/kneipe"
+LOGFILE="/tmp/kneipe-appimage.log"
+ICON="$HERE/kneipe.png"
+
+# === INSTALLER-DIALOG (Zenity, sofort, schnell) ===
+if [ -n "$APPIMAGE" ] && [ ! -f "$DEFAULT_DIR/server.py" ]; then
+  CHOICE=$(zenity --question \
+    --title="🍺 Kneipen-Schlägerei" \
+    --window-icon="$ICON" \
+    --text="Willkommen bei der Kneipen-Schlägerei!\n\n<b>Was passiert:</b>\n• Server wird installiert\n• Desktop-Icon wird erstellt\n• Python-Umgebung wird eingerichtet\n• Browser öffnet sich automatisch\n\n<b>Erster Start dauert ~1-2 Minuten</b> (Pakete werden installiert).\nDanach startet die Kneipe sofort.\n\nJetzt installieren und starten?" \
+    --ok-label="🍺 Installieren" \
+    --cancel-label="Abbrechen" \
+    --width=450 2>/dev/null; echo $?)
+
+  [ "$CHOICE" != "0" ] && exit 0
+
+  # Ordner wählen
+  CUSTOM_DIR=$(zenity --file-selection --directory \
+    --title="🍺 Installationsordner wählen" \
+    --window-icon="$ICON" \
+    --filename="$DEFAULT_DIR/" \
+    --width=500 --height=400 2>/dev/null)
+
+  if [ -n "$CUSTOM_DIR" ]; then
+    DEFAULT_DIR="$CUSTOM_DIR"
+  fi
+fi
+
+WORK_DIR="$DEFAULT_DIR"
+
+# 1. Dateien kopieren/updaten
+if [ ! -f "$WORK_DIR/server.py" ]; then
+  mkdir -p "$WORK_DIR"
+  cp -r "$KNEIPE_SRC"/* "$WORK_DIR/"
+  chmod +x "$WORK_DIR/start.sh" 2>/dev/null
+fi
+[ "$KNEIPE_SRC/server.py" -nt "$WORK_DIR/server.py" ] 2>/dev/null && cp "$KNEIPE_SRC/server.py" "$KNEIPE_SRC/index.html" "$KNEIPE_SRC/requirements.txt" "$WORK_DIR/" 2>/dev/null
+
+# 2. Desktop-Icon (zeigt auf start.sh im installierten Ordner)
+if [ -n "$APPIMAGE" ] && [ ! -f "$HOME/.local/share/applications/kneipe.desktop" ]; then
+  mkdir -p "$HOME/.local/share/applications"
+  cat > "$HOME/.local/share/applications/kneipe.desktop" << EOF
+[Desktop Entry]
+Name=Kneipen-Schlägerei
+Comment=Decentralized Communication Hub
+Exec=python3 $WORK_DIR/kneipe-tray.py
+Icon=$WORK_DIR/kneipe.png
+Terminal=false
+Type=Application
+Categories=Network;Chat;
+EOF
+  chmod +x "$HOME/.local/share/applications/kneipe.desktop"
+  mkdir -p "$HOME/.local/share/icons/hicolor/512x512/apps"
+  cp "$HERE/kneipe.png" "$HOME/.local/share/icons/hicolor/512x512/apps/kneipe.png" 2>/dev/null
+  cp "$HERE/kneipe.png" "$WORK_DIR/kneipe.png" 2>/dev/null
+  update-desktop-database "$HOME/.local/share/applications" 2>/dev/null
+fi
+
+cd "$WORK_DIR"
+
+# 3. venv + deps (mit Fortschritt)
+if [ ! -f "$WORK_DIR/venv/bin/python3" ]; then
+  (
+    echo "10"; echo "# Python-Umgebung erstellen..."
+    python3 -m venv "$WORK_DIR/venv" >> "$LOGFILE" 2>&1
+    echo "30"; echo "# Pakete installieren..."
+    "$WORK_DIR/venv/bin/pip" install --upgrade pip -q >> "$LOGFILE" 2>&1
+    echo "60"; echo "# Abhängigkeiten installieren..."
+    "$WORK_DIR/venv/bin/pip" install -r "$WORK_DIR/requirements.txt" -q >> "$LOGFILE" 2>&1
+    echo "90"; echo "# Themen konvertieren..."
+    [ -f "$WORK_DIR/converter.py" ] && "$WORK_DIR/venv/bin/python3" "$WORK_DIR/converter.py" >> "$LOGFILE" 2>&1
+    echo "100"; echo "# Fertig!"
+  ) | zenity --progress --title="🍺 Kneipen-Schlägerei" \
+      --window-icon="$ICON" \
+      --text="Erster Start — Umgebung wird eingerichtet..." \
+      --percentage=0 --auto-close --no-cancel --width=400 2>/dev/null
+else
+  # Themen bei jedem Start konvertieren
+  [ -f "$WORK_DIR/converter.py" ] && [ -d "$WORK_DIR/Themen" ] && "$WORK_DIR/venv/bin/python3" "$WORK_DIR/converter.py" >> "$LOGFILE" 2>&1
+fi
+
+# 4. Tray-Icon starten (Server + Status + Menü)
+# System-Python für GTK/AppIndicator3, Server nutzt venv intern
+exec python3 "$WORK_DIR/kneipe-tray.py"
