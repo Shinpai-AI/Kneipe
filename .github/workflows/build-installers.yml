@@ -51,6 +51,11 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Install build tools (cmake + git for liboqs)
+        run: |
+          choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
+          refreshenv
+
       - name: Create Windows Installer
         shell: pwsh
         run: |
