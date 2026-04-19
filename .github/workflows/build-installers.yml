@@ -63,8 +63,11 @@ jobs:
           (Get-Content "installer-build/python/python312._pth") -replace '#import site','import site' | Set-Content "installer-build/python/python312._pth"
           Invoke-WebRequest -Uri "https://bootstrap.pypa.io/get-pip.py" -OutFile "installer-build/python/get-pip.py"
           & "installer-build/python/python.exe" "installer-build/python/get-pip.py" --no-warn-script-location 2>$null
-          # Pre-install dependencies
-          & "installer-build/python/python.exe" -m pip install -r requirements.txt pystray Pillow --target "installer-build/python/Lib/site-packages" --no-warn-script-location 2>$null
+          # Pre-install dependencies (core only, skip C-compile packages)
+          & "installer-build/python/python.exe" -m pip install pyotp qrcode Pillow edge-tts cryptography pystray --target "installer-build/python/Lib/site-packages" --no-warn-script-location 2>$null
+          # Try optional packages (may fail without C compiler, that's OK)
+          & "installer-build/python/python.exe" -m pip install hdwallet bitcoin-utils --target "installer-build/python/Lib/site-packages" --no-warn-script-location --only-binary :all: 2>$null
+          & "installer-build/python/python.exe" -m pip install liboqs-python --target "installer-build/python/Lib/site-packages" --no-warn-script-location --only-binary :all: 2>$null
           # Copy app files
           Copy-Item "server.py","index.html","requirements.txt","converter.py","kneipe-tray.py" -Destination "installer-build/" -ErrorAction SilentlyContinue
           Copy-Item -Path "Themen","badges" -Destination "installer-build/" -Recurse -ErrorAction SilentlyContinue
