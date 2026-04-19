@@ -105,7 +105,11 @@ def start_server_process():
         status = "error"
         return
 
-    kwargs = {"cwd": str(SCRIPT_DIR), "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    # Server-Log in Datei schreiben statt DEVNULL (zum Debuggen)
+    log_path = SCRIPT_DIR / "logs"
+    log_path.mkdir(exist_ok=True)
+    log_file = open(str(log_path / "server-stdout.log"), "a")
+    kwargs = {"cwd": str(SCRIPT_DIR), "stdout": log_file, "stderr": log_file}
     if not IS_WINDOWS:
         kwargs["start_new_session"] = True
     else:
