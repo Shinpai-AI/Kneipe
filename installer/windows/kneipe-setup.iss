@@ -2,7 +2,7 @@
 AppName=Kneipen-Schlägerei
 AppVersion=1.5.1
 AppPublisher=Shinpai-AI
-DefaultDirName={localappdata}\Kneipe
+DefaultDirName={commonappdata}\Kneipe
 DefaultGroupName=Kneipen-Schlägerei
 OutputBaseFilename=Kneipe-Setup
 Compression=lzma
@@ -14,6 +14,9 @@ UninstallDisplayIcon={app}\kneipe.ico
 
 [Files]
 Source: "installer-build\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
+; Schreibrechte für den Kneipe-Ordner setzen (Server braucht db, vault, logs)
+[Dirs]
+Name: "{app}"; Permissions: users-modify
 
 [Icons]
 Name: "{group}\Kneipen-Schlägerei"; Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\kneipe-tray.py"""; IconFilename: "{app}\kneipe.ico"; WorkingDir: "{app}"
