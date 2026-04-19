@@ -109,42 +109,8 @@ jobs:
           name: Kneipe-Windows-Setup
           path: Output/*.exe
 
-  build-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Create macOS App Bundle
-        run: |
-          APP="Kneipe.app"
-          mkdir -p "$APP/Contents/MacOS"
-          mkdir -p "$APP/Contents/Resources"
-          # Copy app files
-          cp server.py index.html requirements.txt start.sh converter.py kneipe-tray.py "$APP/Contents/Resources/" 2>/dev/null || true
-          cp -r Themen badges "$APP/Contents/Resources/" 2>/dev/null || true
-          cp *.png *.ico *.jpg *.json *.xml *.js *.mp3 *.html *.webp "$APP/Contents/Resources/" 2>/dev/null || true
-          # Create launcher
-          cp installer/macos/kneipe-launcher.sh "$APP/Contents/MacOS/Kneipe"
-          chmod +x "$APP/Contents/MacOS/Kneipe"
-          # Info.plist
-          cp installer/macos/Info.plist "$APP/Contents/"
-          # Icon
-          cp installer/macos/kneipe.icns "$APP/Contents/Resources/" 2>/dev/null || true
-          # Create DMG
-          hdiutil create -volname "Kneipe" -srcfolder "$APP" -ov -format UDZO Kneipe-macOS.dmg
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Kneipe-macOS-DMG
-          path: Kneipe-macOS.dmg
-
   release:
-    needs: [build-linux, build-windows, build-macos]
+    needs: [build-linux, build-windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
@@ -156,5 +122,4 @@ jobs:
           files: |
             Kneipe-Linux-AppImage/Kneipe-x86_64.AppImage
             Kneipe-Windows-Setup/*.exe
-            Kneipe-macOS-DMG/Kneipe-macOS.dmg
           generate_release_notes: true
