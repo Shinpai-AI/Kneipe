@@ -66,16 +66,21 @@ def kill_old_servers():
 
 
 def find_python():
-    """Python im venv finden (Linux: venv/bin/python3, Windows: venv/Scripts/python.exe)."""
+    """Python finden: venv > embedded python > system python."""
+    candidates = []
     if IS_WINDOWS:
-        p = SCRIPT_DIR / "venv" / "Scripts" / "python.exe"
-        if p.exists():
-            return str(p)
-        p = SCRIPT_DIR / "venv" / "Scripts" / "python3.exe"
-        if p.exists():
-            return str(p)
+        candidates = [
+            SCRIPT_DIR / "venv" / "Scripts" / "python.exe",
+            SCRIPT_DIR / "venv" / "Scripts" / "python3.exe",
+            SCRIPT_DIR / "python" / "python.exe",
+            SCRIPT_DIR / "python" / "pythonw.exe",
+        ]
     else:
-        p = SCRIPT_DIR / "venv" / "bin" / "python3"
+        candidates = [
+            SCRIPT_DIR / "venv" / "bin" / "python3",
+            SCRIPT_DIR / "env" / "bin" / "python3",
+        ]
+    for p in candidates:
         if p.exists():
             return str(p)
     return None
