@@ -14,7 +14,7 @@ UninstallDisplayIcon={app}\kneipe.ico
 
 [Files]
 Source: "installer-build\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
-; Schreibrechte für den Kneipe-Ordner setzen (Server braucht db, vault, logs)
+
 [Dirs]
 Name: "{app}"; Permissions: users-modify
 
@@ -23,11 +23,14 @@ Name: "{group}\Kneipen-Schlägerei"; Filename: "{app}\python\pythonw.exe"; Param
 Name: "{commondesktop}\Kneipen-Schlägerei"; Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\kneipe-tray.py"""; IconFilename: "{app}\kneipe.ico"; WorkingDir: "{app}"
 
 [Run]
-; Firewall-Regel anlegen (Python darf auf Port 4567 lauschen)
-Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Kneipen-Schlägerei"" dir=in action=allow program=""{app}\python\python.exe"" enable=yes profile=private,public"; Flags: runhidden waituntilterminated; StatusMsg: "Firewall-Regel wird angelegt..."
-; Programm starten
+; Firewall-Regeln anlegen (python.exe UND pythonw.exe!)
+Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Kneipe-python"" dir=in action=allow program=""{app}\python\python.exe"" enable=yes profile=private,public"; Flags: runhidden waituntilterminated; StatusMsg: "Firewall-Regel wird angelegt..."
+Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Kneipe-pythonw"" dir=in action=allow program=""{app}\python\pythonw.exe"" enable=yes profile=private,public"; Flags: runhidden waituntilterminated
+; Server einmal starten damit DB/Vault initialisiert werden (kurz laufen lassen)
+Filename: "{app}\python\python.exe"; Parameters: "-c ""import subprocess,time,sys; p=subprocess.Popen([sys.executable, 'server.py'], cwd=r'{app}'); time.sleep(8); p.terminate()"""; Flags: runhidden waituntilterminated; StatusMsg: "Server wird initialisiert..."; WorkingDir: "{app}"
+; Programm starten (Tray + Server)
 Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\kneipe-tray.py"""; Description: "Kneipen-Schlägerei starten"; Flags: nowait postinstall skipifsilent; WorkingDir: "{app}"
 
 [UninstallRun]
-; Firewall-Regel beim Deinstallieren entfernen
-Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Kneipen-Schlägerei"""; Flags: runhidden waituntilterminated
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Kneipe-python"""; Flags: runhidden waituntilterminated
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Kneipe-pythonw"""; Flags: runhidden waituntilterminated
