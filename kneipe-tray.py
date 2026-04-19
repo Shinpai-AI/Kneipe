@@ -41,16 +41,22 @@ def kill_old_servers():
     """Alte Server-Prozesse auf Port killen."""
     try:
         if IS_WINDOWS:
+            # Alle Prozesse auf dem Port finden und killen
             result = subprocess.run(
                 ["netstat", "-ano"], capture_output=True, text=True, timeout=5)
+            killed = set()
             for line in result.stdout.split("\n"):
                 if f":{PORT}" in line and "LISTENING" in line:
                     pid = line.strip().split()[-1]
-                    try:
-                        os.kill(int(pid), signal.SIGTERM)
-                    except (ProcessLookupError, ValueError, PermissionError):
-                        pass
-            time.sleep(2)
+                    if pid not in killed and pid != "0":
+                        try:
+                            subprocess.run(["taskkill", "/F", "/PID", pid],
+                                           capture_output=True, timeout=5)
+                            killed.add(pid)
+                        except Exception:
+                            pass
+            if killed:
+                time.sleep(2)
         else:
             result = subprocess.run(["lsof", "-t", "-i", f":{PORT}"],
                                     capture_output=True, text=True, timeout=5)
@@ -137,11 +143,21 @@ def quit_app():
     """Server beenden und App schliessen."""
     global server_proc
     if server_proc:
-        server_proc.terminate()
-        try:
-            server_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            server_proc.kill()
+        if IS_WINDOWS:
+            # Windows: taskkill /F /T killt den ganzen Prozessbaum
+            try:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(server_proc.pid)],
+                               capture_output=True, timeout=5)
+            except Exception:
+                server_proc.kill()
+        else:
+            server_proc.terminate()
+            try:
+                server_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                server_proc.kill()
+    # Sicherheitshalber: Port nochmal freigeben
+    kill_old_servers()
 
 
 # ═══════════════════════════════════════════
