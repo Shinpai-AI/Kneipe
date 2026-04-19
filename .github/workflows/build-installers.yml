@@ -77,21 +77,16 @@ jobs:
           Expand-Archive -Path "python-embed.zip" -DestinationPath "installer-build/python" -Force
           # Enable site-packages in embedded Python
           (Get-Content "installer-build/python/python312._pth") -replace '#import site','import site' | Set-Content "installer-build/python/python312._pth"
-          # Install ALL deps via setup-python (has C compiler!) into site-packages
+          # Install deps — OHNE liboqs-python (pip install kaputt wegen Branch-Bug)
           New-Item -ItemType Directory -Path "installer-build/python/Lib/site-packages" -Force
-          # Set liboqs path so liboqs-python finds it during install
-          $env:LIBOQS_INSTALL_PATH = "$env:GITHUB_WORKSPACE/liboqs-install"
-          pip install -r requirements.txt pystray Pillow --target "installer-build/python/Lib/site-packages" --no-warn-script-location
-          # Copy liboqs DLL into python folder so it's found at runtime
-          # Copy liboqs DLL everywhere it might be needed
-          $dllSources = @("$env:GITHUB_WORKSPACE/liboqs-install/bin/oqs.dll", "$env:GITHUB_WORKSPACE/liboqs-install/bin/liboqs.dll", "$env:GITHUB_WORKSPACE/liboqs-install/lib/oqs.dll")
-          $dllDests = @("installer-build/python/", "installer-build/python/Lib/site-packages/oqs/")
-          foreach ($src in $dllSources) {
-            if (Test-Path $src) {
-              foreach ($dst in $dllDests) {
-                Copy-Item $src -Destination $dst -ErrorAction SilentlyContinue
-              }
-            }
+          pip install pyotp qrcode Pillow edge-tts cryptography hdwallet bitcoin-utils pystray --target "installer-build/python/Lib/site-packages" --no-warn-script-location
+          # liboqs-python MANUELL: Python-Wrapper von GitHub + kompilierte DLL
+          git clone --depth 1 https://github.com/open-quantum-safe/liboqs-python.git liboqs-py-src
+          Copy-Item -Path "liboqs-py-src/oqs" -Destination "installer-build/python/Lib/site-packages/oqs" -Recurse
+          # DLL in oqs Ordner + python Ordner kopieren
+          Get-ChildItem "$env:GITHUB_WORKSPACE/liboqs-install" -Recurse -Filter "*.dll" | ForEach-Object {
+            Copy-Item $_.FullName -Destination "installer-build/python/Lib/site-packages/oqs/" -ErrorAction SilentlyContinue
+            Copy-Item $_.FullName -Destination "installer-build/python/" -ErrorAction SilentlyContinue
           }
           # Copy app files
           Copy-Item "server.py","index.html","requirements.txt","converter.py","kneipe-tray.py" -Destination "installer-build/" -ErrorAction SilentlyContinue
