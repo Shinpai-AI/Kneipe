@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
 """Kneipen-Schlägerei System-Tray Icon.
 Startet Server, zeigt Status, Rechtsklick-Menü.
-Verwendet AppIndicator3 (funktioniert auf KDE Wayland + GNOME + X11)."""
+Universell: Linux (AppIndicator3) + Windows (pystray) + macOS (pystray)."""
 
-import os, sys, signal, subprocess, threading, time, webbrowser, tempfile
+import os, sys, signal, subprocess, threading, time, webbrowser, tempfile, platform
 from pathlib import Path
-
-import gi
-gi.require_version('Gtk', '3.0')
-gi.require_version('AppIndicator3', '0.1')
-from gi.repository import Gtk, AppIndicator3, GLib
 from PIL import Image, ImageDraw
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PORT = 4567
 URL = f"http://localhost:{PORT}"
+IS_WINDOWS = platform.system() == "Windows"
+IS_LINUX = platform.system() == "Linux"
 server_proc = None
-status = "starting"  # starting, running, error
-indicator = None
+status = "starting"
 
 
 def _prepare_logo_icon():
@@ -36,103 +32,104 @@ def _prepare_logo_icon():
             d = ImageDraw.Draw(img)
             d.ellipse([4, 4, 60, 60], fill=(212, 168, 80, 255))
             img.save(str(path))
-    return str(icon_dir), icon_name
+    return str(icon_dir), icon_name, str(path)
 
-ICON_DIR, ICON_NAME = _prepare_logo_icon()
+ICON_DIR, ICON_NAME, ICON_PATH = _prepare_logo_icon()
 
 
 def kill_old_servers():
     """Alte Server-Prozesse auf Port killen."""
     try:
-        result = subprocess.run(["lsof", "-t", "-i", f":{PORT}"],
-                                capture_output=True, text=True, timeout=5)
-        if result.stdout.strip():
-            for pid in result.stdout.strip().split("\n"):
-                try:
-                    os.kill(int(pid), signal.SIGTERM)
-                except (ProcessLookupError, ValueError):
-                    pass
+        if IS_WINDOWS:
+            result = subprocess.run(
+                ["netstat", "-ano"], capture_output=True, text=True, timeout=5)
+            for line in result.stdout.split("\n"):
+                if f":{PORT}" in line and "LISTENING" in line:
+                    pid = line.strip().split()[-1]
+                    try:
+                        os.kill(int(pid), signal.SIGTERM)
+                    except (ProcessLookupError, ValueError, PermissionError):
+                        pass
             time.sleep(2)
+        else:
+            result = subprocess.run(["lsof", "-t", "-i", f":{PORT}"],
+                                    capture_output=True, text=True, timeout=5)
+            if result.stdout.strip():
+                for pid in result.stdout.strip().split("\n"):
+                    try:
+                        os.kill(int(pid), signal.SIGTERM)
+                    except (ProcessLookupError, ValueError):
+                        pass
+                time.sleep(2)
     except Exception:
         pass
 
 
-def update_icon(new_status):
-    """Icon-Status aendern (thread-safe via GLib.idle_add)."""
-    global status
-    status = new_status
-    GLib.idle_add(indicator.set_icon_full, ICON_NAME, f"Kneipe - {new_status}")
+def find_python():
+    """Python im venv finden (Linux: venv/bin/python3, Windows: venv/Scripts/python.exe)."""
+    if IS_WINDOWS:
+        p = SCRIPT_DIR / "venv" / "Scripts" / "python.exe"
+        if p.exists():
+            return str(p)
+        p = SCRIPT_DIR / "venv" / "Scripts" / "python3.exe"
+        if p.exists():
+            return str(p)
+    else:
+        p = SCRIPT_DIR / "venv" / "bin" / "python3"
+        if p.exists():
+            return str(p)
+    return None
 
 
-def start_server():
-    """Server starten und Status ueberwachen."""
-    global server_proc
+def start_server_process():
+    """Server starten und warten bis er antwortet."""
+    global server_proc, status
 
     kill_old_servers()
 
-    venv_python = SCRIPT_DIR / "venv" / "bin" / "python3"
+    python = find_python()
     server_py = SCRIPT_DIR / "server.py"
 
-    if not venv_python.exists():
-        update_icon("error")
+    if not python:
+        status = "error"
         return
 
-    server_proc = subprocess.Popen(
-        [str(venv_python), str(server_py)],
-        cwd=str(SCRIPT_DIR),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    kwargs = {"cwd": str(SCRIPT_DIR), "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if not IS_WINDOWS:
+        kwargs["start_new_session"] = True
+    else:
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+    server_proc = subprocess.Popen([python, str(server_py)], **kwargs)
 
     import urllib.request
     for _ in range(30):
         time.sleep(1)
         if server_proc.poll() is not None:
-            update_icon("error")
+            status = "error"
             return
         try:
             urllib.request.urlopen(URL, timeout=2)
-            update_icon("running")
+            status = "running"
             webbrowser.open(URL)
             return
         except Exception:
             pass
-
-    update_icon("error")
+    status = "error"
 
 
 def monitor_server():
     """Server-Prozess ueberwachen."""
+    global status
     while True:
         time.sleep(5)
         if server_proc and server_proc.poll() is not None:
             if status != "error":
-                update_icon("error")
+                status = "error"
 
 
-def on_open(_):
-    webbrowser.open(URL)
-
-
-def on_status(_):
-    if status == "running":
-        msg = f"Server laeuft auf Port {PORT}"
-    elif status == "starting":
-        msg = "Server startet..."
-    else:
-        msg = "Server-Fehler! Logs pruefen."
-    dialog = Gtk.MessageDialog(
-        message_type=Gtk.MessageType.INFO,
-        buttons=Gtk.ButtonsType.OK,
-        text="Kneipen-Schlägerei",
-        secondary_text=msg
-    )
-    dialog.run()
-    dialog.destroy()
-
-
-def on_quit(_):
+def quit_app():
+    """Server beenden und App schliessen."""
     global server_proc
     if server_proc:
         server_proc.terminate()
@@ -140,46 +137,112 @@ def on_quit(_):
             server_proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             server_proc.kill()
-    Gtk.main_quit()
 
 
-def main():
-    global indicator
+# ═══════════════════════════════════════════
+#  LINUX: AppIndicator3 + GTK3
+# ═══════════════════════════════════════════
+
+def run_linux():
+    import gi
+    gi.require_version('Gtk', '3.0')
+    gi.require_version('AppIndicator3', '0.1')
+    from gi.repository import Gtk, AppIndicator3, GLib
 
     indicator = AppIndicator3.Indicator.new(
-        "kneipe-tray",
-        ICON_NAME,
-        AppIndicator3.IndicatorCategory.APPLICATION_STATUS,
-    )
+        "kneipe-tray", ICON_NAME,
+        AppIndicator3.IndicatorCategory.APPLICATION_STATUS)
     indicator.set_icon_theme_path(ICON_DIR)
     indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
 
-    # Rechtsklick-Menü
     menu = Gtk.Menu()
-
     item_open = Gtk.MenuItem(label="Kneipe öffnen")
-    item_open.connect("activate", on_open)
+    item_open.connect("activate", lambda _: webbrowser.open(URL))
     menu.append(item_open)
 
     item_status = Gtk.MenuItem(label="Status")
-    item_status.connect("activate", on_status)
+    def show_status(_):
+        msgs = {"running": f"Server läuft auf Port {PORT}",
+                "starting": "Server startet...",
+                "error": "Server-Fehler! Logs prüfen."}
+        d = Gtk.MessageDialog(message_type=Gtk.MessageType.INFO,
+                              buttons=Gtk.ButtonsType.OK,
+                              text="Kneipen-Schlägerei",
+                              secondary_text=msgs.get(status, "Unbekannt"))
+        d.run(); d.destroy()
+    item_status.connect("activate", show_status)
     menu.append(item_status)
 
     menu.append(Gtk.SeparatorMenuItem())
 
     item_quit = Gtk.MenuItem(label="Beenden")
-    item_quit.connect("activate", on_quit)
+    item_quit.connect("activate", lambda _: (quit_app(), Gtk.main_quit()))
     menu.append(item_quit)
 
     menu.show_all()
     indicator.set_menu(menu)
 
-    # Server im Hintergrund starten
-    threading.Thread(target=start_server, daemon=True).start()
+    threading.Thread(target=start_server_process, daemon=True).start()
     threading.Thread(target=monitor_server, daemon=True).start()
-
     Gtk.main()
 
 
+# ═══════════════════════════════════════════
+#  WINDOWS / macOS: pystray
+# ═══════════════════════════════════════════
+
+def run_pystray():
+    import pystray
+
+    icon_image = Image.open(ICON_PATH)
+
+    def on_open(icon, item):
+        webbrowser.open(URL)
+
+    def on_status_click(icon, item):
+        msgs = {"running": f"Server läuft auf Port {PORT}",
+                "starting": "Server startet...",
+                "error": "Server-Fehler! Logs prüfen."}
+        # Einfache Benachrichtigung
+        try:
+            icon.notify(msgs.get(status, "Unbekannt"), "Kneipen-Schlägerei")
+        except Exception:
+            pass
+
+    def on_quit_click(icon, item):
+        quit_app()
+        icon.stop()
+
+    icon = pystray.Icon(
+        "kneipe",
+        icon_image,
+        "Kneipen-Schlägerei",
+        menu=pystray.Menu(
+            pystray.MenuItem("Kneipe öffnen", on_open, default=True),
+            pystray.MenuItem("Status", on_status_click),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Beenden", on_quit_click),
+        )
+    )
+
+    def startup():
+        start_server_process()
+
+    threading.Thread(target=startup, daemon=True).start()
+    threading.Thread(target=monitor_server, daemon=True).start()
+    icon.run()
+
+
+# ═══════════════════════════════════════════
+#  MAIN
+# ═══════════════════════════════════════════
+
 if __name__ == "__main__":
-    main()
+    if IS_LINUX:
+        try:
+            run_linux()
+        except Exception:
+            # Fallback auf pystray wenn AppIndicator nicht verfügbar
+            run_pystray()
+    else:
+        run_pystray()

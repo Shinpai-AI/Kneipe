@@ -56,11 +56,26 @@ jobs:
         run: |
           # Create installer directory
           New-Item -ItemType Directory -Path "installer-build" -Force
+          # Download embedded Python (no install needed on user PC!)
+          Invoke-WebRequest -Uri "https://www.python.org/ftp/python/3.12.8/python-3.12.8-embed-amd64.zip" -OutFile "python-embed.zip"
+          Expand-Archive -Path "python-embed.zip" -DestinationPath "installer-build/python" -Force
+          # Enable pip in embedded Python
+          (Get-Content "installer-build/python/python312._pth") -replace '#import site','import site' | Set-Content "installer-build/python/python312._pth"
+          Invoke-WebRequest -Uri "https://bootstrap.pypa.io/get-pip.py" -OutFile "installer-build/python/get-pip.py"
+          & "installer-build/python/python.exe" "installer-build/python/get-pip.py" --no-warn-script-location 2>$null
+          # Pre-install dependencies
+          & "installer-build/python/python.exe" -m pip install -r requirements.txt pystray Pillow --target "installer-build/python/Lib/site-packages" --no-warn-script-location 2>$null
           # Copy app files
-          Copy-Item "server.py","index.html","requirements.txt","start.sh","converter.py","kneipe-tray.py" -Destination "installer-build/" -ErrorAction SilentlyContinue
+          Copy-Item "server.py","index.html","requirements.txt","converter.py","kneipe-tray.py" -Destination "installer-build/" -ErrorAction SilentlyContinue
           Copy-Item -Path "Themen","badges" -Destination "installer-build/" -Recurse -ErrorAction SilentlyContinue
           Copy-Item "*.png","*.ico","*.jpg","*.json","*.xml","*.js","*.mp3","*.html","*.webp" -Destination "installer-build/" -ErrorAction SilentlyContinue
-          # Create Inno Setup script
+          # Create Windows start script
+          @"
+          @echo off
+          cd /d "%~dp0"
+          start "" python\python.exe kneipe-tray.py
+          "@ | Set-Content "installer-build/Kneipe.bat"
+          # Copy Inno Setup script
           Copy-Item "installer/windows/kneipe-setup.iss" -Destination "." -ErrorAction SilentlyContinue
 
       - name: Build with Inno Setup
