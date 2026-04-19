@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
 Name=Kneipen-Schlägerei
-Comment=Decentralized Communication Hub — Seelenfick für die Kneipe
+Comment=Decentralized Communication Hub
 Exec=AppRun
 Icon=kneipe
 Categories=Network;Chat;
-Terminal=true
+Terminal=false

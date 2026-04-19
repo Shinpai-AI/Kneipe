@@ -31,7 +31,7 @@ jobs:
           cp installer/linux/AppRun Kneipe.AppDir/AppRun
           chmod +x Kneipe.AppDir/AppRun
           cp installer/linux/kneipe.desktop Kneipe.AppDir/
-          cp app-icon-512.png Kneipe.AppDir/kneipe.png 2>/dev/null || true
+          cp kneipe.png Kneipe.AppDir/kneipe.png 2>/dev/null || true
           ln -sf kneipe.png Kneipe.AppDir/.DirIcon
           # Build
           ARCH=x86_64 ./appimagetool --no-appstream Kneipe.AppDir Kneipe-x86_64.AppImage

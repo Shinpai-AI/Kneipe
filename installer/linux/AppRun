@@ -46,7 +46,7 @@ if [ -n "$APPIMAGE" ] && [ ! -f "$HOME/.local/share/applications/kneipe.desktop"
 [Desktop Entry]
 Name=Kneipen-Schlägerei
 Comment=Decentralized Communication Hub
-Exec=python3 $WORK_DIR/kneipe-tray.py
+Exec=/usr/bin/python3 $WORK_DIR/kneipe-tray.py
 Icon=$WORK_DIR/kneipe.png
 Terminal=false
 Type=Application
