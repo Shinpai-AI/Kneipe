@@ -83,8 +83,16 @@ jobs:
           $env:LIBOQS_INSTALL_PATH = "$env:GITHUB_WORKSPACE/liboqs-install"
           pip install -r requirements.txt pystray Pillow --target "installer-build/python/Lib/site-packages" --no-warn-script-location
           # Copy liboqs DLL into python folder so it's found at runtime
-          Copy-Item "$env:GITHUB_WORKSPACE/liboqs-install/bin/oqs.dll" -Destination "installer-build/python/" -ErrorAction SilentlyContinue
-          Copy-Item "$env:GITHUB_WORKSPACE/liboqs-install/bin/liboqs.dll" -Destination "installer-build/python/" -ErrorAction SilentlyContinue
+          # Copy liboqs DLL everywhere it might be needed
+          $dllSources = @("$env:GITHUB_WORKSPACE/liboqs-install/bin/oqs.dll", "$env:GITHUB_WORKSPACE/liboqs-install/bin/liboqs.dll", "$env:GITHUB_WORKSPACE/liboqs-install/lib/oqs.dll")
+          $dllDests = @("installer-build/python/", "installer-build/python/Lib/site-packages/oqs/")
+          foreach ($src in $dllSources) {
+            if (Test-Path $src) {
+              foreach ($dst in $dllDests) {
+                Copy-Item $src -Destination $dst -ErrorAction SilentlyContinue
+              }
+            }
+          }
           # Copy app files
           Copy-Item "server.py","index.html","requirements.txt","converter.py","kneipe-tray.py" -Destination "installer-build/" -ErrorAction SilentlyContinue
           Copy-Item -Path "Themen","badges" -Destination "installer-build/" -Recurse -ErrorAction SilentlyContinue
