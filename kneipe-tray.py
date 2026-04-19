@@ -10,6 +10,7 @@ import gi
 gi.require_version('Gtk', '3.0')
 gi.require_version('AppIndicator3', '0.1')
 from gi.repository import Gtk, AppIndicator3, GLib
+from PIL import Image, ImageDraw
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PORT = 4567
