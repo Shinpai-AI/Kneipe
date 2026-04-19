@@ -19,4 +19,11 @@ Name: "{group}\Kneipen-Schlägerei"; Filename: "{app}\python\pythonw.exe"; Param
 Name: "{commondesktop}\Kneipen-Schlägerei"; Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\kneipe-tray.py"""; IconFilename: "{app}\kneipe.ico"; WorkingDir: "{app}"
 
 [Run]
+; Firewall-Regel anlegen (Python darf auf Port 4567 lauschen)
+Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""Kneipen-Schlägerei"" dir=in action=allow program=""{app}\python\python.exe"" enable=yes profile=private,public"; Flags: runhidden waituntilterminated; StatusMsg: "Firewall-Regel wird angelegt..."
+; Programm starten
 Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\kneipe-tray.py"""; Description: "Kneipen-Schlägerei starten"; Flags: nowait postinstall skipifsilent; WorkingDir: "{app}"
+
+[UninstallRun]
+; Firewall-Regel beim Deinstallieren entfernen
+Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""Kneipen-Schlägerei"""; Flags: runhidden waituntilterminated
