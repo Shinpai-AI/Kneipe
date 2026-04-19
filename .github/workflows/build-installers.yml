@@ -51,10 +51,21 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install build tools (cmake + git for liboqs)
+      - name: Install build tools
         run: |
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
-          refreshenv
+
+      - name: Build liboqs from source
+        shell: pwsh
+        run: |
+          # liboqs-python 0.14.1 hat kaputten Branch-Checkout, daher liboqs selber bauen
+          git clone --depth 1 --branch main https://github.com/open-quantum-safe/liboqs.git
+          cd liboqs
+          mkdir build; cd build
+          cmake -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE/liboqs-install" ..
+          cmake --build . --config Release
+          cmake --install . --config Release
+          cd $env:GITHUB_WORKSPACE
 
       - name: Create Windows Installer
         shell: pwsh
@@ -68,7 +79,12 @@ jobs:
           (Get-Content "installer-build/python/python312._pth") -replace '#import site','import site' | Set-Content "installer-build/python/python312._pth"
           # Install ALL deps via setup-python (has C compiler!) into site-packages
           New-Item -ItemType Directory -Path "installer-build/python/Lib/site-packages" -Force
+          # Set liboqs path so liboqs-python finds it during install
+          $env:LIBOQS_INSTALL_PATH = "$env:GITHUB_WORKSPACE/liboqs-install"
           pip install -r requirements.txt pystray Pillow --target "installer-build/python/Lib/site-packages" --no-warn-script-location
+          # Copy liboqs DLL into python folder so it's found at runtime
+          Copy-Item "$env:GITHUB_WORKSPACE/liboqs-install/bin/oqs.dll" -Destination "installer-build/python/" -ErrorAction SilentlyContinue
+          Copy-Item "$env:GITHUB_WORKSPACE/liboqs-install/bin/liboqs.dll" -Destination "installer-build/python/" -ErrorAction SilentlyContinue
           # Copy app files
           Copy-Item "server.py","index.html","requirements.txt","converter.py","kneipe-tray.py" -Destination "installer-build/" -ErrorAction SilentlyContinue
           Copy-Item -Path "Themen","badges" -Destination "installer-build/" -Recurse -ErrorAction SilentlyContinue
