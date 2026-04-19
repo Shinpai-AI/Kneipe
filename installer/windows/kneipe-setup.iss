@@ -2,7 +2,7 @@
 AppName=Kneipen-Schlägerei
 AppVersion=1.5.1
 AppPublisher=Shinpai-AI
-DefaultDirName={autopf}\Kneipe
+DefaultDirName={localappdata}\Kneipe
 DefaultGroupName=Kneipen-Schlägerei
 OutputBaseFilename=Kneipe-Setup
 Compression=lzma
