@@ -105,11 +105,13 @@ def start_server_process():
         status = "error"
         return
 
-    # Server-Log in Datei schreiben statt DEVNULL (zum Debuggen)
+    # Server-Log in Datei schreiben (UTF-8 damit Emojis funktionieren!)
     log_path = SCRIPT_DIR / "logs"
     log_path.mkdir(exist_ok=True)
-    log_file = open(str(log_path / "server-stdout.log"), "a")
-    kwargs = {"cwd": str(SCRIPT_DIR), "stdout": log_file, "stderr": log_file}
+    log_file = open(str(log_path / "server-stdout.log"), "a", encoding="utf-8")
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    kwargs = {"cwd": str(SCRIPT_DIR), "stdout": log_file, "stderr": log_file, "env": env}
     if not IS_WINDOWS:
         kwargs["start_new_session"] = True
     else:
