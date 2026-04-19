@@ -20,7 +20,7 @@ echo ""
 # 1. System-Pakete
 echo "[1/5] System-Pakete installieren..."
 pkg update -y
-pkg install -y python git curl build-essential libjpeg-turbo libpng zlib freetype
+pkg install -y python git curl build-essential libjpeg-turbo libpng zlib freetype rust openssl
 
 # 2. App klonen oder updaten
 echo ""
