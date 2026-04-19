@@ -1,10 +1,10 @@
 [Setup]
 AppName=Kneipen-Schlägerei
-AppVersion=1.5.0
+AppVersion=1.5.1
 AppPublisher=Shinpai-AI
 DefaultDirName={autopf}\Kneipe
 DefaultGroupName=Kneipen-Schlägerei
-OutputBaseFilename=Kneipe-Setup-v1.5.0
+OutputBaseFilename=Kneipe-Setup
 Compression=lzma
 SolidCompression=yes
 SetupIconFile=installer-build\kneipe.ico
@@ -15,8 +15,8 @@ UninstallDisplayIcon={app}\kneipe.ico
 Source: "installer-build\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 
 [Icons]
-Name: "{group}\Kneipen-Schlägerei"; Filename: "{app}\Kneipe.bat"; IconFilename: "{app}\kneipe.ico"
-Name: "{commondesktop}\Kneipen-Schlägerei"; Filename: "{app}\Kneipe.bat"; IconFilename: "{app}\kneipe.ico"
+Name: "{group}\Kneipen-Schlägerei"; Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\kneipe-tray.py"""; IconFilename: "{app}\kneipe.ico"; WorkingDir: "{app}"
+Name: "{commondesktop}\Kneipen-Schlägerei"; Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\kneipe-tray.py"""; IconFilename: "{app}\kneipe.ico"; WorkingDir: "{app}"
 
 [Run]
-Filename: "{app}\Kneipe.bat"; Description: "Kneipen-Schlägerei starten"; Flags: nowait postinstall skipifsilent shellexec
+Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\kneipe-tray.py"""; Description: "Kneipen-Schlägerei starten"; Flags: nowait postinstall skipifsilent; WorkingDir: "{app}"

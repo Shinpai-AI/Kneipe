@@ -68,12 +68,8 @@ jobs:
           Copy-Item "server.py","index.html","requirements.txt","converter.py","kneipe-tray.py" -Destination "installer-build/" -ErrorAction SilentlyContinue
           Copy-Item -Path "Themen","badges" -Destination "installer-build/" -Recurse -ErrorAction SilentlyContinue
           Copy-Item "*.png","*.ico","*.jpg","*.json","*.xml","*.js","*.mp3","*.html","*.webp" -Destination "installer-build/" -ErrorAction SilentlyContinue
-          # Create Windows start script
-          @"
-          @echo off
-          cd /d "%~dp0"
-          start "" python\python.exe kneipe-tray.py
-          "@ | Set-Content "installer-build/Kneipe.bat"
+          # Copy .ico for installer icon
+          Copy-Item "kneipe.ico" -Destination "installer-build/" -ErrorAction SilentlyContinue
           # Copy Inno Setup script
           Copy-Item "installer/windows/kneipe-setup.iss" -Destination "." -ErrorAction SilentlyContinue
 
