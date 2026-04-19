@@ -39,14 +39,40 @@ Every version is anchored on the **Bitcoin blockchain** via OP_RETURN — tamper
 - **2FA (TOTP)** — Optional for all accounts, mandatory for critical operations.
 - **Self-Hosted** — Runs on any machine. Copies to USB, starts anywhere.
 
-## Quick Start
+## Installation
+
+### Linux (AppImage)
+
+Download `Kneipe-x86_64.AppImage` from [Releases](https://github.com/Shinpai-AI/Kneipe/releases), then:
 
 ```bash
-# Clone
+chmod +x Kneipe-x86_64.AppImage
+./Kneipe-x86_64.AppImage
+```
+
+Installs via Zenity dialog with folder selection. Creates desktop shortcut and system tray icon.
+
+### Windows (Installer)
+
+Download `Kneipe-Setup.exe` from [Releases](https://github.com/Shinpai-AI/Kneipe/releases) and run it. Includes embedded Python — no system Python needed. Creates Start Menu shortcut, desktop icon, and system tray. Configures Windows Firewall automatically.
+
+### Android (Termux)
+
+Install [Termux](https://github.com/termux/termux-app/releases) from GitHub (not Play Store!), then run:
+
+```bash
+curl -sL https://raw.githubusercontent.com/Shinpai-AI/Kneipe/main/installer/android/install-termux.sh | bash
+```
+
+Start afterwards with: `bash ~/kneipe-start.sh`
+
+**Note:** Requires a device with at least 4 GB RAM (Android 2020+). Older devices may fail to compile the cryptography package.
+
+### Manual (any platform)
+
+```bash
 git clone https://github.com/Shinpai-AI/Kneipe.git
 cd Kneipe
-
-# Start (creates venv automatically)
 bash start.sh start
 ```
 
