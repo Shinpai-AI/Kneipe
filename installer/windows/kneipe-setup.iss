@@ -9,6 +9,7 @@ Compression=lzma
 SolidCompression=yes
 SetupIconFile=installer-build\kneipe.ico
 WizardStyle=modern
+PrivilegesRequired=admin
 UninstallDisplayIcon={app}\kneipe.ico
 
 [Files]
