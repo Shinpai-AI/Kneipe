@@ -88,6 +88,8 @@ jobs:
             Copy-Item $_.FullName -Destination "installer-build/python/Lib/site-packages/oqs/" -ErrorAction SilentlyContinue
             Copy-Item $_.FullName -Destination "installer-build/python/" -ErrorAction SilentlyContinue
           }
+          # oqs.py patchen damit sie die mitgelieferte DLL findet
+          python installer/windows/patch_oqs.py "installer-build/python/Lib/site-packages/oqs"
           # Copy app files
           Copy-Item "server.py","index.html","requirements.txt","converter.py","kneipe-tray.py" -Destination "installer-build/" -ErrorAction SilentlyContinue
           Copy-Item -Path "Themen","badges" -Destination "installer-build/" -Recurse -ErrorAction SilentlyContinue
