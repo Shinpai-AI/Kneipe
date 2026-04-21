@@ -5342,9 +5342,172 @@ def handle_tresen_stream(user_id, since):
     return events
 
 
+# ============================================================================
+# BROADCAST-FIX 2026-04-21: _broadcast_chat_send
+# Ein Input (Text oder Voice) → 1x Voice-Save, 1x TTS, 1x Whisper
+# → dieselbe msg-Reference in alle Target-Channels einfügen.
+# Ersetzt N-fachen handle_chat_send in Tresen/Durchsage (vorher: N TTS/Whisper
+# parallel, überlastete den Voice-Server, Transkript kam nicht an).
+# Voice-Messages werden erst appendet wenn Whisper fertig ist (oder Timeout).
+# Text-Messages werden erst appendet wenn TTS fertig ist.
+# ============================================================================
+def _broadcast_chat_send(user_id, text, voice_data, voice_input, channel_ids,
+                         is_owner_voice=False, encrypted_payload=None):
+    # Access-Check: nur Channels wo user Member oder Durchsage-Watcher ist
+    valid_channels = []
+    errors = []
+    for cid in channel_ids:
+        ch, _ = _find_channel(cid)
+        if not ch:
+            errors.append({'channel_id': cid, 'error': 'gone'})
+            continue
+        if user_id not in ch.get('members', set()) and user_id not in ch.get('durchsage_watchers', set()):
+            errors.append({'channel_id': cid, 'error': 'no access'})
+            continue
+        valid_channels.append((cid, ch))
+    if not valid_channels:
+        return {'ok': False, 'sent_to': [], 'errors': errors or [{'error': 'Keine gültigen Channels'}]}
+
+    first_cid, first_ch = valid_channels[0]
+    name = first_ch.get('member_names', {}).get(user_id, '???')
+    now = time.time()
+
+    # 1. VOICE 1x speichern (wenn mitgeschickt)
+    voice_url = None
+    voice_fpath = None
+    if voice_data and voice_data.startswith('data:audio'):
+        try:
+            ext = 'webm' if 'webm' in voice_data.split(',')[0] else 'mp4'
+            raw = base64.b64decode(voice_data.split(',')[1])
+            if 100 < len(raw) < 2 * 1024 * 1024:
+                file_id = str(uuid.uuid4())[:8]
+                voice_fpath = os.path.join(VOICE_DIR, f'chat_{file_id}.{ext}')
+                with open(voice_fpath, 'wb') as f:
+                    f.write(raw)
+                voice_url = f'/api/chat-file/{file_id}.{ext}'
+                log.info(f'🎤 BROADCAST-VOICE — {name}: {len(raw)} bytes → {len(valid_channels)} ch')
+                if not text:
+                    text = '🎤 ...'
+        except Exception as e:
+            log.error(f'❌ Broadcast-Voice Fehler: {e}')
+
+    # 2. MSG bauen (SHARED REFERENCE — eine Instanz in allen chat_rooms!)
+    msg = {
+        'user_id': user_id, 'user': name, 'text': text, 'time': now,
+        'file_url': voice_url,
+        'filetype': 'audio/webm' if voice_url else None,
+        'filename': 'Voice' if voice_url else None,
+        'tts_url': None,
+    }
+    if is_owner_voice:
+        msg['is_owner_voice'] = True
+    if encrypted_payload and isinstance(encrypted_payload, dict):
+        msg['encrypted'] = {
+            'nonce': encrypted_payload.get('nonce', ''),
+            'ciphertext': encrypted_payload.get('ciphertext', ''),
+            'alg': encrypted_payload.get('alg', 'AES-256-GCM'),
+        }
+
+    # 3. TTS 1x starten (nur wenn KEIN Voice-Input)
+    tts_url = None
+    if not voice_url and not voice_input:
+        conn_acc2 = get_db('accounts.db')
+        user_row = conn_acc2.execute('SELECT tts_voice, is_guest FROM users WHERE id = ?', (user_id,)).fetchone()
+        conn_acc2.close()
+        voice_id = user_row['tts_voice'] if user_row and user_row['tts_voice'] else 'de-DE-ConradNeural'
+        _is_guest = bool(user_row and user_row['is_guest'])
+        tts_id = f'chat_{str(uuid.uuid4())[:8]}'
+        tts_path = os.path.join(VOICE_DIR, f'{tts_id}')
+
+        def _gen_broadcast_tts():
+            _guest_bark_ok = _is_guest and _guest_config().get('bark_enabled', False)
+            if (not _is_guest or _guest_bark_ok) and _voice_server_available():
+                bark_voice = voice_id if not voice_id.startswith('de-') else 'mann1'
+                audio_b64 = _bark_generate(text, bark_voice)
+                if audio_b64:
+                    try:
+                        raw = base64.b64decode(audio_b64.split(',')[1])
+                        with open(tts_path + '.wav', 'wb') as f:
+                            f.write(raw)
+                        msg['_tts_ready'] = True
+                        log.info(f'🔊 BARK-TTS broadcast — "{text[:30]}..." [{bark_voice}]')
+                        return
+                    except Exception as e:
+                        log.error(f'❌ Bark-Save Fehler: {e}')
+            if voice_id.startswith('de-'):
+                edge_voice = voice_id
+            elif voice_id.startswith('frau') or voice_id == 'frau_sanft' or voice_id == 'mann2' or 'girl' in voice_id or 'frau' in voice_id:
+                edge_voice = 'de-DE-KatjaNeural'
+            else:
+                edge_voice = 'de-DE-ConradNeural'
+            try:
+                tmp_mp3 = tts_path + '.mp3.tmp'
+                communicate = edge_tts.Communicate(text, edge_voice)
+                loop = asyncio.new_event_loop()
+                loop.run_until_complete(communicate.save(tmp_mp3))
+                loop.close()
+                wav_file = tts_path + '.wav'
+                import subprocess
+                subprocess.run(['ffmpeg', '-y', '-i', tmp_mp3, wav_file], capture_output=True)
+                if os.path.exists(wav_file) and os.path.getsize(wav_file) > 100:
+                    try: os.remove(tmp_mp3)
+                    except: pass
+                    msg['_tts_ready'] = True
+                    log.info(f'🔊 EDGE-TTS broadcast WAV — "{text[:30]}..."')
+                else:
+                    os.rename(tmp_mp3, tts_path + '.mp3')
+                    msg['_tts_ready'] = True
+                    log.info(f'🔊 EDGE-TTS broadcast MP3 — "{text[:30]}..."')
+            except Exception as e:
+                msg['_tts_ready'] = True
+                log.error(f'❌ Broadcast-TTS Fehler: {e}')
+        threading.Thread(target=_gen_broadcast_tts, daemon=True).start()
+        tts_url = f'/api/bierdeckel/voice/{tts_id}'
+        msg['tts_url'] = tts_url
+
+    # 4. APPEND: Text → warte TTS. Voice → warte Whisper. Sonst → sofort.
+    def _append_all():
+        with chat_lock:
+            for cid, ch in valid_channels:
+                room = chat_rooms.setdefault(cid, [])
+                room.append(msg)  # SHARED REFERENCE
+                if len(room) > 200:
+                    chat_rooms[cid] = room[-200:]
+                ch['last_active'] = now
+                if 'member_last_active' in ch:
+                    ch['member_last_active'][user_id] = now
+
+    if tts_url:
+        def _append_after_tts_ready():
+            for _ in range(1200):  # 120s timeout (Bark kann lang brauchen)
+                time.sleep(0.1)
+                if msg.get('_tts_ready'):
+                    break
+            _append_all()
+        threading.Thread(target=_append_after_tts_ready, daemon=True).start()
+    elif voice_url and _voice_server_available() and voice_fpath and os.path.exists(voice_fpath):
+        def _append_after_whisper():
+            try:
+                whisper_text = _whisper_transcribe(voice_fpath, tisch_id=first_cid)
+                if whisper_text:
+                    msg['text'] = whisper_text
+                    log.info(f'🎤 Whisper broadcast: "{whisper_text[:60]}" → {len(valid_channels)} ch')
+            except Exception as e:
+                log.error(f'❌ Whisper-Broadcast Fehler: {e}')
+            _append_all()
+        threading.Thread(target=_append_after_whisper, daemon=True).start()
+    else:
+        # Kein TTS, kein Whisper — sofort appenden (Platzhalter bleibt ggf.)
+        _append_all()
+
+    sent_optimistic = [cid for cid, _ in valid_channels]
+    return {'ok': True, 'sent_to': sent_optimistic, 'errors': errors, 'msg': msg}
+
+
 def handle_tresen_send(user_id, data):
     """Tresen-Sitzer sendet: in Tresen-Chat + speak-Tische des eigenen Raums.
     KEIN is_owner_voice (auch Owner spricht hier als normaler Tresen-Sitzer).
+    BROADCAST-FIX 2026-04-21: nutzt _broadcast_chat_send (1x Voice/TTS/Whisper).
     """
     tresen_raum = _user_tresen_raum(user_id)
     if not tresen_raum:
@@ -5358,32 +5521,17 @@ def handle_tresen_send(user_id, data):
     subs = _tresen_get(user_id)
     speak_targets = [cid for cid, info in subs.items()
                      if info.get('mode') == 'speak' and cid != tresen_id]
-    # Tresen-Chat IMMER (Mit-Sitzer hören/sehen's), dann speak-Tische
+    # Tresen-Chat IMMER zuerst, dann speak-Tische
     all_targets = [tresen_id] + speak_targets
-    sent, errors = [], []
-    for cid in all_targets:
-        ch, _ = _find_channel(cid)
-        if not ch:
-            errors.append({'channel_id': cid, 'error': 'gone'})
-            continue
-        try:
-            send_data = {
-                'tisch_id': cid, 'text': text, 'voice': voice_data,
-                'voice_input': voice_input,
-                # KEIN _owner_broadcast — User spricht als normaler Tresen-Sitzer
-            }
-            result = handle_chat_send(user_id, send_data)
-            if result.get('ok'):
-                sent.append(cid)
-            else:
-                errors.append({'channel_id': cid, 'error': result.get('error', 'send failed')})
-        except Exception as e:
-            errors.append({'channel_id': cid, 'error': str(e)[:100]})
-    return {'ok': bool(sent), 'sent_to': sent, 'errors': errors}
+    return _broadcast_chat_send(user_id, text, voice_data, voice_input,
+                                all_targets, is_owner_voice=False,
+                                encrypted_payload=data.get('encrypted_payload'))
 
 
 def handle_durchsage_send(user_id, data):
-    """Owner-only: Durchsage-Send mit is_owner_voice=True (gold markiert)."""
+    """Owner-only: Durchsage-Send mit is_owner_voice=True (gold markiert).
+    BROADCAST-FIX 2026-04-21: nutzt _broadcast_chat_send (1x Voice/TTS/Whisper).
+    """
     if not _user_is_owner(user_id):
         return {'error': 'Durchsage-Tab nur für Owner', '_status': 403}
     text = (data.get('text') or '').strip()
@@ -5395,28 +5543,10 @@ def handle_durchsage_send(user_id, data):
     speak_targets = [cid for cid, info in subs.items() if info.get('mode') == 'speak']
     if not speak_targets:
         return {'error': 'Keine Ziele mit "speak"-Modus ausgewählt', '_status': 400}
-    sent = []
-    errors = []
-    # User ist bei subscribe schon als durchsage_watcher eingetragen →
-    # handle_chat_send erlaubt ihn automatisch (Member ODER Watcher).
-    for cid in speak_targets:
-        ch, raum = _find_channel(cid)
-        if not ch:
-            errors.append({'channel_id': cid, 'error': 'gone'})
-            continue
-        try:
-            send_data = {
-                'tisch_id': cid, 'text': text, 'voice': voice_data,
-                'voice_input': voice_input, '_owner_broadcast': True,
-            }
-            result = handle_chat_send(user_id, send_data)
-            if result.get('ok'):
-                sent.append(cid)
-            else:
-                errors.append({'channel_id': cid, 'error': result.get('error', 'send failed')})
-        except Exception as e:
-            errors.append({'channel_id': cid, 'error': str(e)[:100]})
-    return {'ok': bool(sent), 'sent_to': sent, 'errors': errors}
+    # User ist bei subscribe als durchsage_watcher eingetragen → Access OK.
+    return _broadcast_chat_send(user_id, text, voice_data, voice_input,
+                                speak_targets, is_owner_voice=True,
+                                encrypted_payload=data.get('encrypted_payload'))
 
 
 def can_access_channel(user_id, channel_id, for_subscribe=False):

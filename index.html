@@ -870,7 +870,7 @@ body { background: #0a0a0a; color: #e0d8c8; font-family: 'Georgia', serif; min-h
 
   <!-- Tresen-Multi-Stream -->
   <div style="color:#d4a850;font-size:11px;font-weight:bold;margin:8px 0 4px 0;">📡 Multi-Stream (Tresen + ausgewählte Tische)</div>
-  <div id="tresen-stream" style="height:240px;overflow-y:auto;background:#0a0a0a;border:1px solid #3a3020;border-radius:6px;padding:8px;font-size:12px;line-height:1.5;"></div>
+  <div id="tresen-stream" style="min-height:400px;max-height:60vh;overflow-y:auto;background:#0a0a0a;border:1px solid #3a3020;border-radius:6px;padding:8px;font-size:13px;line-height:1.4;display:flex;flex-direction:column;gap:4px;"></div>
 
   <!-- Eingabe -->
   <div style="display:flex;gap:6px;margin-top:8px;align-items:center;">
@@ -1295,7 +1295,7 @@ body { background: #0a0a0a; color: #e0d8c8; font-family: 'Georgia', serif; min-h
 
       <!-- Aggregator-Chat -->
       <div style="color:#d4a850;font-size:11px;font-weight:bold;margin-top:12px;margin-bottom:4px;">📡 Multi-Stream</div>
-      <div id="durchsage-stream" style="height:280px;overflow-y:auto;background:#0a0a0a;border:1px solid #3a3020;border-radius:6px;padding:8px;font-size:12px;line-height:1.5;"></div>
+      <div id="durchsage-stream" style="min-height:400px;max-height:60vh;overflow-y:auto;background:#0a0a0a;border:1px solid #3a3020;border-radius:6px;padding:8px;font-size:13px;line-height:1.4;display:flex;flex-direction:column;gap:4px;"></div>
 
       <!-- Aktive Subscriptions + Sound-Toggles -->
       <div style="color:#d4a850;font-size:11px;font-weight:bold;margin-top:10px;margin-bottom:4px;">🔊 Aktive Subs</div>
@@ -5276,15 +5276,7 @@ async function durchsagePoll() {
       const stream = document.getElementById('durchsage-stream');
       for (const ev of events) {
         if (ev.msg?.time > durchsageSince) durchsageSince = ev.msg.time;
-        const isOwner = ev.msg.is_owner_voice;
-        const ownerStyle = isOwner ? 'background:linear-gradient(90deg,rgba(212,168,80,0.25),transparent);border-left:3px solid #d4a850;padding-left:6px;' : '';
-        const system = ev.msg.system;
-        const sysStyle = system ? 'color:#887755;font-style:italic;' : '';
-        const text = (ev.msg.text || '').replace(/</g, '&lt;');
-        const prefix = isOwner ? '📢 OWNER' : (ev.msg.user || 'system');
-        const tag = `<span style="background:#3a3020;color:#d4a850;font-size:9px;padding:1px 4px;border-radius:3px;margin-right:4px;">${ev.kind === 'tresen' ? '🍻' : '🪑'} ${ev.raum_name}·${ev.channel_label}</span>`;
-        const line = `<div style="margin:2px 0;${ownerStyle}${sysStyle}">${tag}<b>${prefix}:</b> ${text}</div>`;
-        stream.insertAdjacentHTML('beforeend', line);
+        stream.insertAdjacentHTML('beforeend', renderStreamBubble(ev, true));
       }
       // Auto-scroll + Limit
       stream.scrollTop = stream.scrollHeight;
@@ -5345,7 +5337,27 @@ document.getElementById('btn-durchsage-voice').onclick = async () => {
     const rec = new MediaRecorder(stream, {mimeType: 'audio/webm'});
     const chunks = [];
     rec.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+    // Parallele Browser-Transkription (wie am Tisch)
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let _durchsageTranscript = '';
+    let _durchsageRecognizer = null;
+    if (SR) {
+      _durchsageRecognizer = new SR();
+      _durchsageRecognizer.lang = 'de-DE';
+      _durchsageRecognizer.continuous = true;
+      _durchsageRecognizer.interimResults = false;
+      _durchsageRecognizer.onresult = (e) => {
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          if (e.results[i].isFinal) {
+            _durchsageTranscript += (_durchsageTranscript ? ' ' : '') + e.results[i][0].transcript.trim();
+          }
+        }
+      };
+      try { _durchsageRecognizer.start(); } catch(_) {}
+    }
     rec.onstop = async () => {
+      if (_durchsageRecognizer) { try { _durchsageRecognizer.stop(); } catch(_) {} }
+      await new Promise(r => setTimeout(r, 300));
       stream.getTracks().forEach(t => t.stop());
       window._durchsageRecording = null;
       btn.textContent = '🎤'; btn.style.color = '';
@@ -5360,7 +5372,7 @@ document.getElementById('btn-durchsage-voice').onclick = async () => {
       if (!chunks.length) return;
       const blob = new Blob(chunks, {type: 'audio/webm'});
       const b64 = await new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(blob); });
-      const res = await api('/api/durchsage/send', 'POST', {voice: b64, voice_input: true});
+      const res = await api('/api/durchsage/send', 'POST', {voice: b64, voice_input: true, text: _durchsageTranscript});
       if (res.error) {
         msg.style.color = '#e55'; msg.textContent = '❌ ' + res.error;
       } else {
@@ -5499,6 +5511,40 @@ async function tresenCycle(channelId) {
 }
 
 let tresenMuted = false;
+
+// Stream-Render für Tresen + Durchsage: chat-msg-Bubble wie Tisch.
+// withRaum=true → zeigt Raum-Name im Channel-Tag (Durchsage blickt über Räume hinweg).
+function renderStreamBubble(ev, withRaum) {
+  const m = ev.msg || {};
+  const isOwner = !!m.is_owner_voice;
+  const isSystem = !!m.system;
+  const text = (m.text || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const prefixName = isOwner ? `📢 OWNER · ${m.user || 'system'}` : (m.user || 'system');
+  const channelIcon = ev.kind === 'tresen' ? '🍻' : '🪑';
+  const channelText = withRaum && ev.raum_name ? `${ev.raum_name}·${ev.channel_label}` : (ev.channel_label || '');
+  const tag = `<span style="background:#3a3020;color:#d4a850;font-size:9px;padding:1px 4px;border-radius:3px;margin-right:4px;">${channelIcon} ${channelText}</span>`;
+  const timeStr = m.time ? new Date(m.time * 1000).toLocaleTimeString('de-DE', {hour:'2-digit', minute:'2-digit'}) : '';
+  let voiceHtml = '';
+  // Voice-Input: file_url mit audio-Filetype → direkt abspielen.
+  // Text-Input: tts_url → generierte Stimme.
+  const isAudioFile = m.file_url && m.filetype && m.filetype.startsWith('audio/');
+  const voiceSrc = isAudioFile ? m.file_url : m.tts_url;
+  if (voiceSrc) {
+    const ttsId = 'stb_' + Math.random().toString(36).slice(2,8);
+    voiceHtml = `<div style="margin-top:4px;display:flex;align-items:center;gap:5px;padding:4px 8px;background:rgba(212,168,80,.06);border:1px solid rgba(212,168,80,.12);border-radius:6px;font-size:0.7rem;"><audio id="${ttsId}" src="${voiceSrc}" preload="none" style="display:none"></audio><button onclick="ttsPlay('${ttsId}',this)" style="background:none;border:none;cursor:pointer;font-size:0.85rem;color:#d4a850;">▶️</button><input type="range" class="tts-seek" data-id="${ttsId}" min="0" max="100" value="0" style="flex:1;height:3px;accent-color:#d4a850;"><span id="time_${ttsId}" style="color:#665540;min-width:30px;font-size:0.65rem;">0:00</span></div>`;
+  }
+  if (isSystem) {
+    return `<div class="chat-system" style="margin:4px 0;">${tag}${text}</div>`;
+  }
+  const cls = 'chat-msg other' + (isOwner ? ' owner-voice-msg' : '');
+  return `<div class="${cls}" style="max-width:100%;margin:4px 0;">
+    <div class="msg-name">${tag}${prefixName}</div>
+    <div class="msg-text" style="white-space:pre-wrap;">${text}</div>
+    ${voiceHtml}
+    <div class="msg-time">${timeStr}</div>
+  </div>`;
+}
+
 async function tresenPoll() {
   if (!tresenCurrentRaum) return;
   try {
@@ -5507,13 +5553,7 @@ async function tresenPoll() {
       const stream = document.getElementById('tresen-stream');
       for (const ev of events) {
         if (ev.msg?.time > tresenSince) tresenSince = ev.msg.time;
-        const isOwner = ev.msg.is_owner_voice;
-        const ownerStyle = isOwner ? 'background:linear-gradient(90deg,rgba(212,168,80,0.25),transparent);border-left:3px solid #d4a850;padding-left:6px;' : '';
-        const sysStyle = ev.msg.system ? 'color:#887755;font-style:italic;' : '';
-        const text = (ev.msg.text || '').replace(/</g, '&lt;');
-        const prefix = isOwner ? '📢 OWNER' : (ev.msg.user || 'system');
-        const tag = `<span style="background:#3a3020;color:#d4a850;font-size:9px;padding:1px 4px;border-radius:3px;margin-right:4px;">${ev.kind === 'tresen' ? '🍻' : '🪑'} ${ev.channel_label}</span>`;
-        stream.insertAdjacentHTML('beforeend', `<div style="margin:2px 0;${ownerStyle}${sysStyle}">${tag}<b>${prefix}:</b> ${text}</div>`);
+        stream.insertAdjacentHTML('beforeend', renderStreamBubble(ev));
         // Auto-Play: Tresen-Chat IMMER (wenn nicht muted), Tische nur bei sound=true.
         // Self-Filter macht registerIncomingTrack zentral.
         if (!tresenMuted && ev.msg.tts_url) {
@@ -5551,7 +5591,27 @@ document.getElementById('btn-tresen-voice').onclick = async () => {
     const rec = new MediaRecorder(stream, {mimeType: 'audio/webm'});
     const chunks = [];
     rec.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+    // Parallele Browser-Transkription (wie am Tisch)
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let _tresenTranscript = '';
+    let _tresenRecognizer = null;
+    if (SR) {
+      _tresenRecognizer = new SR();
+      _tresenRecognizer.lang = 'de-DE';
+      _tresenRecognizer.continuous = true;
+      _tresenRecognizer.interimResults = false;
+      _tresenRecognizer.onresult = (e) => {
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          if (e.results[i].isFinal) {
+            _tresenTranscript += (_tresenTranscript ? ' ' : '') + e.results[i][0].transcript.trim();
+          }
+        }
+      };
+      try { _tresenRecognizer.start(); } catch(_) {}
+    }
     rec.onstop = async () => {
+      if (_tresenRecognizer) { try { _tresenRecognizer.stop(); } catch(_) {} }
+      await new Promise(r => setTimeout(r, 300));  // letztes isFinal abwarten
       stream.getTracks().forEach(t => t.stop());
       window._tresenRecording = null;
       btn.textContent = '🎤'; btn.style.color = '#887755';
@@ -5565,7 +5625,7 @@ document.getElementById('btn-tresen-voice').onclick = async () => {
       if (!chunks.length) return;
       const blob = new Blob(chunks, {type: 'audio/webm'});
       const b64 = await new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(blob); });
-      await api('/api/tresen/send', 'POST', {voice: b64, voice_input: true});
+      await api('/api/tresen/send', 'POST', {voice: b64, voice_input: true, text: _tresenTranscript});
       msg.style.color = '#4a8a4a';
       msg.textContent = '🎤 gesendet.';
     };
