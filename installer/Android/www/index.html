@@ -129,10 +129,13 @@ h2 { font-size: 14px; color: #d4a850; margin-bottom: 8px; }
       <div class="title" id="chat-title">Tisch</div>
       <div class="sub" id="chat-sub"></div>
     </div>
+    <button class="ghost" onclick="toggleMembers()" title="Mitglieder">👥</button>
   </div>
+  <div id="members-panel" style="display:none; padding: 8px; background: #0a0a0a; border-bottom: 1px solid #3a3020; overflow-x: auto; white-space: nowrap;"></div>
   <div class="chat-messages" id="chat-messages"></div>
   <div class="chat-input-row">
     <input id="chat-input" placeholder="Nachricht" onkeydown="if(event.key==='Enter') sendMsg()">
+    <button id="btn-rec" onclick="toggleRecording()" style="background:none;border:1px solid #3a3020;color:#887755;padding:10px;border-radius:8px;cursor:pointer;font-size:18px;">🎤</button>
     <button class="primary" onclick="sendMsg()">Senden</button>
   </div>
 </div>
@@ -428,11 +431,21 @@ async function pollChat() {
         div.style.cssText = 'text-align:center; color:#665540; font-size:11px; font-style:italic; padding:4px;';
         div.textContent = m.text;
       } else {
+        const isOwnerVoice = !!m.is_owner_voice;
         div.className = 'chat-msg ' + (isSelf ? 'self' : 'other');
+        if (isOwnerVoice) div.style.cssText = 'border-left: 3px solid #d4a850;';
         const timeStr = m.time ? new Date(m.time*1000).toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'}) : '';
+        const audioSrc = (m.file_url && m.filetype && m.filetype.startsWith('audio/')) ? m.file_url : m.tts_url;
+        const audioBlock = audioSrc ? `
+          <div style="margin-top:4px; display:flex; align-items:center; gap:6px; padding:4px 8px; background: rgba(212,168,80,0.08); border-radius:6px;">
+            <button onclick="playAudio(this)" data-src="${state.server.url}${audioSrc}" style="background:none; border:none; color:#d4a850; font-size:16px; cursor:pointer;">▶️</button>
+            <span style="color:#665540; font-size:10px;">Voice</span>
+          </div>` : '';
+        const prefix = isOwnerVoice ? '📢 OWNER · ' : '';
         div.innerHTML = `
-          <div class="msg-name">${escapeHtml(m.user)}</div>
+          <div class="msg-name">${prefix}${escapeHtml(m.user)}</div>
           <div class="msg-text">${escapeHtml(m.text || '')}</div>
+          ${audioBlock}
           <div class="msg-time">${timeStr}</div>
         `;
       }
@@ -451,6 +464,99 @@ async function sendMsg() {
     const r = await api('/api/chat/send', {method: 'POST', body: {tisch_id: state.tisch.id, text}});
     if (r.data && !r.data.ok) toast(r.data.error || 'Fehler');
   } catch(e) { toast('Fehler: ' + e.message); }
+}
+
+// ============================================================
+// AUDIO PLAYER
+// ============================================================
+let _currentAudio = null;
+function playAudio(btn) {
+  if (_currentAudio) { try { _currentAudio.pause(); } catch(_){} }
+  document.querySelectorAll('[data-src]').forEach(b => b.textContent = '▶️');
+  if (btn.textContent === '⏸️') { _currentAudio = null; btn.textContent = '▶️'; return; }
+  const src = btn.dataset.src;
+  _currentAudio = new Audio(src);
+  _currentAudio.play().catch(e => toast('Audio Fehler: ' + e.message));
+  btn.textContent = '⏸️';
+  _currentAudio.onended = () => { btn.textContent = '▶️'; _currentAudio = null; };
+}
+
+// ============================================================
+// MEMBERS
+// ============================================================
+function toggleMembers() {
+  const panel = document.getElementById('members-panel');
+  panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+  if (panel.style.display === 'block') renderMembers();
+}
+
+function renderMembers() {
+  const panel = document.getElementById('members-panel');
+  if (!state.tisch || !state.tisch.members_ranked) { panel.innerHTML = '<span style="color:#665540; font-size:11px;">lade…</span>'; return; }
+  panel.innerHTML = state.tisch.members_ranked.map(m => {
+    const rankIcon = m.cheater ? '💀' : m.rank === 1 ? '🏆' : m.rank === 2 ? '🥈' : m.rank === 3 ? '🤠' : '';
+    const ownerBadge = m.is_owner ? ' 👑' : '';
+    const initial = (m.name || '?')[0].toUpperCase();
+    const avatar = m.profile_pic && m.profile_pic.startsWith('data:') ? `<img src="${m.profile_pic}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">` : initial;
+    const border = m.cheater ? '#a33' : (m.nexus_verified ? '#d4a850' : '#3a3020');
+    return `<div style="display:inline-flex; flex-direction:column; align-items:center; margin-right: 10px; min-width: 52px;">
+      <div style="width:36px; height:36px; border-radius:50%; background:#1a1610; border:2px solid ${border}; display:flex; align-items:center; justify-content:center; font-size:14px; color:#d4a850; overflow:hidden;">${avatar}</div>
+      <div style="font-size:9px; color:#887755; max-width:52px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:2px;">${rankIcon}${escapeHtml(m.name)}${ownerBadge}</div>
+    </div>`;
+  }).join('');
+}
+
+// ============================================================
+// VOICE RECORDING
+// ============================================================
+let _recState = { recorder: null, chunks: [], stream: null, recognizer: null, transcript: '' };
+
+async function toggleRecording() {
+  const btn = document.getElementById('btn-rec');
+  if (_recState.recorder) {
+    // Stoppen + senden
+    _recState.recorder.stop();
+    return;
+  }
+  try {
+    _recState.stream = await navigator.mediaDevices.getUserMedia({audio: true});
+  } catch(e) { toast('Mic nicht verfügbar: ' + e.message); return; }
+  _recState.chunks = [];
+  _recState.transcript = '';
+  _recState.recorder = new MediaRecorder(_recState.stream, {mimeType: 'audio/webm'});
+  _recState.recorder.ondataavailable = e => { if (e.data && e.data.size > 0) _recState.chunks.push(e.data); };
+  _recState.recorder.onstop = async () => {
+    if (_recState.recognizer) { try { _recState.recognizer.stop(); } catch(_){} }
+    await new Promise(r => setTimeout(r, 300));
+    if (_recState.stream) _recState.stream.getTracks().forEach(t => t.stop());
+    btn.textContent = '🎤'; btn.style.color = '#887755';
+    if (!_recState.chunks.length) { _recState.recorder = null; return; }
+    const blob = new Blob(_recState.chunks, {type: 'audio/webm'});
+    const b64 = await new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(blob); });
+    const text = _recState.transcript;
+    _recState.recorder = null; _recState.chunks = [];
+    try {
+      const r = await api('/api/chat/send', {method: 'POST', body: {tisch_id: state.tisch.id, text: text || '', voice: b64, voice_input: true}});
+      if (r.data && !r.data.ok) toast(r.data.error || 'Send-Fehler');
+    } catch(e) { toast('Fehler: ' + e.message); }
+  };
+  // Speech Recognition parallel
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (SR) {
+    _recState.recognizer = new SR();
+    _recState.recognizer.lang = 'de-DE';
+    _recState.recognizer.continuous = true;
+    _recState.recognizer.interimResults = false;
+    _recState.recognizer.onresult = e => {
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) _recState.transcript += (_recState.transcript ? ' ' : '') + e.results[i][0].transcript.trim();
+      }
+    };
+    try { _recState.recognizer.start(); } catch(_) {}
+  }
+  _recState.recorder.start();
+  btn.textContent = '⏹️'; btn.style.color = '#e55';
+  toast('🎤 Aufnahme läuft. Nochmal tippen zum Senden.', 3500);
 }
 
 // ============================================================
