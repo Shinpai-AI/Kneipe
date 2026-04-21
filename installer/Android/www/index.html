@@ -1,101 +1,214 @@
 <!DOCTYPE html>
 <html lang="de">
 <head>
-  <meta charset="UTF-8">
-  <title>Kneipenschlägerei</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body {
-      height: 100%; font-family: 'Segoe UI', system-ui, sans-serif;
-      background: radial-gradient(ellipse at center, #2a1f12 0%, #0a0a0a 80%);
-      color: #e0d8c8;
-    }
-    body {
-      display: flex; flex-direction: column; align-items: center;
-      padding: max(20px, env(safe-area-inset-top, 20px)) 16px max(20px, env(safe-area-inset-bottom, 20px));
-      min-height: 100vh; min-height: 100dvh;
-    }
-    .logo {
-      width: 96px; height: 96px; margin-top: 10vh; margin-bottom: 12px;
-      border-radius: 20px; object-fit: cover;
-      box-shadow: 0 0 24px rgba(212,168,80,0.35);
-    }
-    h1 {
-      font-size: 24px; color: #d4a850; letter-spacing: 0.5px;
-      margin-bottom: 4px; font-weight: bold;
-    }
-    .sub { color: #887755; font-size: 12px; margin-bottom: 24px; }
-    .fav-list {
-      width: 100%; max-width: 420px; display: flex; flex-direction: column; gap: 8px;
-    }
-    .fav {
-      display: flex; align-items: center; gap: 10px;
-      padding: 14px 16px; background: #1a1610; border: 1px solid #3a3020;
-      border-radius: 10px; cursor: pointer;
-      transition: background 0.15s;
-    }
-    .fav:active { background: #2a2015; }
-    .fav-name { flex: 1; color: #d4a850; font-weight: bold; font-size: 15px; }
-    .fav-url { color: #887755; font-size: 11px; margin-top: 2px; }
-    .fav-text { flex: 1; min-width: 0; }
-    .fav-del {
-      background: none; border: none; color: #665540;
-      font-size: 20px; cursor: pointer; padding: 0 6px;
-    }
-    .fav-del:active { color: #a33; }
-    .add-box {
-      width: 100%; max-width: 420px;
-      margin-top: 16px; padding: 14px;
-      background: #1a1610; border: 1px solid #3a3020; border-radius: 10px;
-    }
-    .add-box h2 { font-size: 13px; color: #d4a850; margin-bottom: 8px; font-weight: bold; }
-    input {
-      width: 100%; padding: 10px 12px; margin-bottom: 6px;
-      background: #0a0a0a; border: 1px solid #3a3020; border-radius: 6px;
-      color: #e0d8c8; font-size: 14px; font-family: inherit;
-    }
-    input::placeholder { color: #665540; }
-    .add-btn {
-      width: 100%; padding: 12px; margin-top: 6px;
-      background: #d4a850; color: #0a0a0a; border: none; border-radius: 6px;
-      font-size: 14px; font-weight: bold; cursor: pointer;
-    }
-    .add-btn:active { background: #b89040; }
-    .footer {
-      margin-top: auto; padding-top: 24px;
-      color: #444; font-size: 10px; text-align: center;
-    }
-  </style>
+<meta charset="UTF-8">
+<title>Kneipenschlägerei</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; font-family: 'Segoe UI', system-ui, sans-serif; background: #0a0a0a; color: #e0d8c8; overflow: hidden; }
+body { display: flex; flex-direction: column; min-height: 100dvh; }
+.screen { display: none; flex: 1; flex-direction: column; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); min-height: 100dvh; overflow: hidden; }
+.screen.active { display: flex; }
+.header { display: flex; align-items: center; gap: 8px; padding: 12px 14px; background: #1a1610; border-bottom: 1px solid #3a3020; flex-shrink: 0; }
+.header .back { background: none; border: none; color: #d4a850; font-size: 22px; cursor: pointer; padding: 4px 8px; }
+.header .title { flex: 1; color: #d4a850; font-weight: bold; font-size: 17px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.header .sub { color: #887755; font-size: 10px; }
+.content { flex: 1; overflow-y: auto; padding: 14px; }
+.list { display: flex; flex-direction: column; gap: 8px; }
+.item { padding: 14px; background: #1a1610; border: 1px solid #3a3020; border-radius: 10px; cursor: pointer; display: flex; align-items: center; gap: 10px; transition: background 0.15s; }
+.item:active { background: #2a2015; }
+.item-name { flex: 1; color: #d4a850; font-weight: bold; font-size: 15px; }
+.item-sub { color: #887755; font-size: 11px; margin-top: 2px; }
+.item-meta { color: #665540; font-size: 10px; }
+.input-row { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+input, textarea { width: 100%; padding: 12px; background: #0a0a0a; border: 1px solid #3a3020; border-radius: 8px; color: #e0d8c8; font-size: 14px; font-family: inherit; }
+input::placeholder, textarea::placeholder { color: #665540; }
+button.primary { width: 100%; padding: 14px; background: #d4a850; color: #0a0a0a; border: none; border-radius: 8px; font-size: 15px; font-weight: bold; cursor: pointer; }
+button.primary:active { background: #b89040; }
+button.ghost { background: none; border: 1px solid #3a3020; color: #d4a850; padding: 8px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; }
+.logo-hero { width: 96px; height: 96px; border-radius: 20px; margin: 10vh auto 16px; display: block; box-shadow: 0 0 24px rgba(212,168,80,0.35); }
+h1 { font-size: 24px; color: #d4a850; text-align: center; margin-bottom: 4px; }
+h2 { font-size: 14px; color: #d4a850; margin-bottom: 8px; }
+.center-text { text-align: center; color: #887755; font-size: 12px; margin-bottom: 16px; }
+.chat-screen { display: flex; flex-direction: column; min-height: 100dvh; max-height: 100dvh; }
+.chat-messages { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 6px; background: #0a0a0a; }
+.chat-msg { padding: 8px 12px; border-radius: 10px; max-width: 85%; font-size: 14px; line-height: 1.4; }
+.chat-msg.self { background: rgba(212,168,80,0.15); align-self: flex-end; color: #e0d8c8; }
+.chat-msg.other { background: #1a1610; align-self: flex-start; color: #c8c0b0; }
+.msg-name { font-size: 10px; color: #d4a850; margin-bottom: 2px; font-weight: bold; }
+.msg-text { word-break: break-word; white-space: pre-wrap; }
+.msg-time { font-size: 9px; color: #665540; margin-top: 2px; text-align: right; }
+.chat-input-row { display: flex; gap: 6px; padding: 8px; background: #1a1610; border-top: 1px solid #3a3020; flex-shrink: 0; padding-bottom: calc(8px + env(safe-area-inset-bottom)); }
+.chat-input-row input { flex: 1; }
+.chat-input-row button { flex: 0 0 auto; padding: 10px 14px; }
+.toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #2a2015; color: #d4a850; padding: 10px 16px; border-radius: 8px; font-size: 13px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); z-index: 100; display: none; }
+.toast.show { display: block; }
+.loading { text-align: center; color: #887755; padding: 40px; font-size: 14px; }
+.footer-info { text-align: center; color: #555; font-size: 10px; padding: 10px; }
+</style>
 </head>
 <body>
-  <img src="icon.png" alt="Kneipe" class="logo" onerror="this.style.display='none'">
-  <h1>🍻 Kneipenschlägerei</h1>
-  <div class="sub">Wähle deine Kneipe</div>
 
-  <div class="fav-list" id="fav-list"></div>
-
-  <div class="add-box">
-    <h2>➕ Neue Kneipe</h2>
-    <input id="add-name" placeholder="Name (z.B. Meine Kneipe)">
-    <input id="add-url" placeholder="https://bar.deinedomain.de" inputmode="url">
-    <button class="add-btn" onclick="addFav()">Speichern + Verbinden</button>
+<!-- START-Screen (Favoriten) -->
+<div id="screen-start" class="screen">
+  <div class="content">
+    <img src="icon.png" alt="" class="logo-hero" onerror="this.style.display='none'">
+    <h1>🍻 Kneipenschlägerei</h1>
+    <div class="center-text">Wähle deine Kneipe</div>
+    <div class="list" id="fav-list"></div>
+    <div style="margin-top: 16px; padding: 14px; background: #1a1610; border: 1px solid #3a3020; border-radius: 10px;">
+      <h2>➕ Neue Kneipe</h2>
+      <div class="input-row">
+        <input id="add-name" placeholder="Name">
+        <input id="add-url" placeholder="https://bar.deinedomain.de" inputmode="url">
+      </div>
+      <button class="primary" onclick="addFav()">Hinzufügen</button>
+    </div>
+    <div class="footer-info">Ist einfach passiert. 🐉</div>
   </div>
+</div>
 
-  <div class="footer">Ist einfach passiert. 🐉</div>
+<!-- LOGIN-Screen -->
+<div id="screen-login" class="screen">
+  <div class="header">
+    <button class="back" onclick="go('start')">←</button>
+    <div>
+      <div class="title" id="login-server-name">Login</div>
+      <div class="sub" id="login-server-url"></div>
+    </div>
+  </div>
+  <div class="content">
+    <div class="input-row">
+      <input id="login-username" placeholder="Benutzername" autocapitalize="off" autocomplete="username">
+      <input id="login-password" type="password" placeholder="Passwort" autocomplete="current-password">
+    </div>
+    <button class="primary" onclick="doLogin()">Anmelden</button>
+    <div style="margin-top: 14px; text-align: center;">
+      <button class="ghost" onclick="doGuest()">Als Gast reinschauen</button>
+    </div>
+    <div id="login-msg" style="color:#a33; font-size: 12px; margin-top: 12px; text-align: center;"></div>
+  </div>
+</div>
+
+<!-- RÄUME-Screen -->
+<div id="screen-rooms" class="screen">
+  <div class="header">
+    <button class="back" onclick="logout()">←</button>
+    <div style="flex:1">
+      <div class="title">Räume</div>
+      <div class="sub" id="rooms-user-info"></div>
+    </div>
+    <button class="ghost" onclick="loadRooms()">↻</button>
+  </div>
+  <div class="content">
+    <div id="rooms-list" class="list"></div>
+  </div>
+</div>
+
+<!-- RAUM-Screen (Tische) -->
+<div id="screen-room" class="screen">
+  <div class="header">
+    <button class="back" onclick="go('rooms')">←</button>
+    <div style="flex:1">
+      <div class="title" id="room-name">Raum</div>
+      <div class="sub" id="room-sub"></div>
+    </div>
+    <button class="ghost" onclick="loadRoom()">↻</button>
+  </div>
+  <div class="content">
+    <div id="tables-list" class="list"></div>
+  </div>
+</div>
+
+<!-- CHAT-Screen -->
+<div id="screen-chat" class="screen chat-screen">
+  <div class="header">
+    <button class="back" onclick="leaveTisch()">←</button>
+    <div style="flex:1">
+      <div class="title" id="chat-title">Tisch</div>
+      <div class="sub" id="chat-sub"></div>
+    </div>
+  </div>
+  <div class="chat-messages" id="chat-messages"></div>
+  <div class="chat-input-row">
+    <input id="chat-input" placeholder="Nachricht" onkeydown="if(event.key==='Enter') sendMsg()">
+    <button class="primary" onclick="sendMsg()">Senden</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
 
 <script>
-const DEFAULT_FAV = {name: 'Meine Bar (shinpai.de)', url: 'https://bar.shinpai.de', isDefault: true};
-const KEY = 'kneipe_favorites_v1';
+// ============================================================
+// STATE
+// ============================================================
+let state = {
+  server: null,      // {name, url}
+  user: null,        // {name, is_guest, token?}
+  raum: null,        // {id, name, tische, eigenschaften}
+  tisch: null,       // {id, thema, members}
+  chatSince: 0,
+  pollTimer: null,
+};
+
+// ============================================================
+// ROUTING
+// ============================================================
+function go(screenName) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById('screen-' + screenName).classList.add('active');
+  window.scrollTo(0, 0);
+  // Cleanup chat-poll when leaving chat
+  if (screenName !== 'chat' && state.pollTimer) {
+    clearInterval(state.pollTimer);
+    state.pollTimer = null;
+  }
+}
+
+function toast(msg, ms=2500) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), ms);
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+}
+
+// ============================================================
+// API HELPER
+// ============================================================
+async function api(path, opts={}) {
+  if (!state.server) throw new Error('kein server');
+  const url = state.server.url + path;
+  const fetchOpts = {
+    method: opts.method || 'GET',
+    headers: {'Content-Type': 'application/json'},
+    credentials: 'include',
+  };
+  if (opts.body) fetchOpts.body = JSON.stringify(opts.body);
+  const res = await fetch(url, fetchOpts);
+  const text = await res.text();
+  try { return {status: res.status, data: JSON.parse(text)}; }
+  catch(_) { return {status: res.status, data: text}; }
+}
+
+// ============================================================
+// FAVORITEN (Startscreen)
+// ============================================================
+const DEFAULT_FAV = {name: 'Meine Bar (shinpai.de)', url: 'https://bar.shinpai.de'};
+const FAV_KEY = 'kneipe_favs_v2';
 
 function loadFavs() {
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = localStorage.getItem(FAV_KEY);
     if (raw) return JSON.parse(raw);
   } catch(_) {}
   return [DEFAULT_FAV];
 }
-function saveFavs(favs) { localStorage.setItem(KEY, JSON.stringify(favs)); }
+function saveFavs(favs) { localStorage.setItem(FAV_KEY, JSON.stringify(favs)); }
 
 function renderFavs() {
   const favs = loadFavs();
@@ -103,30 +216,31 @@ function renderFavs() {
   el.innerHTML = '';
   favs.forEach((f, i) => {
     const div = document.createElement('div');
-    div.className = 'fav';
+    div.className = 'item';
     div.innerHTML = `
-      <div class="fav-text">
-        <div class="fav-name">${escapeHtml(f.name)}</div>
-        <div class="fav-url">${escapeHtml(f.url)}</div>
+      <div style="flex:1; min-width: 0;">
+        <div class="item-name">${escapeHtml(f.name)}</div>
+        <div class="item-sub">${escapeHtml(f.url)}</div>
       </div>
-      <button class="fav-del" onclick="event.stopPropagation(); delFav(${i})" title="Löschen">✕</button>
+      <button class="ghost" onclick="event.stopPropagation(); delFav(${i})" title="Löschen">✕</button>
     `;
-    div.onclick = () => connect(f.url);
+    div.onclick = () => selectServer(f);
     el.appendChild(div);
   });
 }
 
-function escapeHtml(s) { return String(s || '').replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c])); }
-
 function addFav() {
   const name = document.getElementById('add-name').value.trim();
   let url = document.getElementById('add-url').value.trim();
-  if (!name || !url) { alert('Name und URL bitte'); return; }
+  if (!name || !url) { toast('Name und URL bitte'); return; }
   if (!url.match(/^https?:\/\//)) url = 'https://' + url;
   const favs = loadFavs();
   favs.push({name, url});
   saveFavs(favs);
-  connect(url);
+  document.getElementById('add-name').value = '';
+  document.getElementById('add-url').value = '';
+  renderFavs();
+  selectServer({name, url});
 }
 
 function delFav(i) {
@@ -137,9 +251,213 @@ function delFav(i) {
   renderFavs();
 }
 
-function connect(url) { window.location.href = url; }
+function selectServer(server) {
+  state.server = server;
+  document.getElementById('login-server-name').textContent = server.name;
+  document.getElementById('login-server-url').textContent = server.url;
+  document.getElementById('login-msg').textContent = '';
+  go('login');
+}
 
+// ============================================================
+// LOGIN
+// ============================================================
+async function doLogin() {
+  const u = document.getElementById('login-username').value.trim();
+  const p = document.getElementById('login-password').value;
+  if (!u || !p) { toast('Name und Passwort'); return; }
+  const msg = document.getElementById('login-msg');
+  msg.style.color = '#887755';
+  msg.textContent = 'Logge ein…';
+  try {
+    const r = await api('/api/login', {method: 'POST', body: {name: u, password: p}});
+    if (r.data && r.data.ok) {
+      state.user = {name: u, is_guest: false};
+      msg.textContent = '';
+      loadRooms();
+    } else {
+      msg.style.color = '#a33';
+      msg.textContent = (r.data && r.data.error) || 'Login fehlgeschlagen';
+    }
+  } catch(e) {
+    msg.style.color = '#a33';
+    msg.textContent = 'Verbindung fehlgeschlagen: ' + e.message;
+  }
+}
+
+async function doGuest() {
+  // Gast: Raum-Liste ist offen, Login nur für Senden nötig
+  state.user = {name: '(Gast)', is_guest: true};
+  loadRooms();
+}
+
+async function logout() {
+  try { await api('/api/logout', {method: 'POST', body: {}}); } catch(_) {}
+  state.user = null;
+  state.raum = null;
+  state.tisch = null;
+  go('start');
+}
+
+// ============================================================
+// RÄUME
+// ============================================================
+async function loadRooms() {
+  go('rooms');
+  document.getElementById('rooms-user-info').textContent = state.user ? `Als: ${state.user.name}` : '';
+  const list = document.getElementById('rooms-list');
+  list.innerHTML = '<div class="loading">Lade…</div>';
+  try {
+    const r = await api('/api/raeume');
+    if (!r.data || !Array.isArray(r.data)) {
+      list.innerHTML = '<div class="loading">Keine Räume</div>';
+      return;
+    }
+    list.innerHTML = '';
+    r.data.forEach(raum => {
+      const div = document.createElement('div');
+      div.className = 'item';
+      const tischeCount = (raum.tische || []).length;
+      const gesamt = (raum.tische || []).reduce((n, t) => n + (t.members || 0), 0);
+      div.innerHTML = `
+        <div style="flex:1;">
+          <div class="item-name">${escapeHtml(raum.name || raum.id)}</div>
+          <div class="item-sub">${tischeCount} Tisch(e) · ${gesamt} Gäste</div>
+        </div>
+      `;
+      div.onclick = () => enterRoom(raum.id);
+      list.appendChild(div);
+    });
+  } catch(e) {
+    list.innerHTML = `<div class="loading" style="color:#a33">Fehler: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function enterRoom(raumId) {
+  go('room');
+  document.getElementById('room-name').textContent = 'Lade…';
+  document.getElementById('room-sub').textContent = '';
+  document.getElementById('tables-list').innerHTML = '<div class="loading">Lade…</div>';
+  state.raum = {id: raumId};
+  loadRoom();
+}
+
+async function loadRoom() {
+  if (!state.raum) return;
+  try {
+    const r = await api(`/api/bar?raum_id=${encodeURIComponent(state.raum.id)}`);
+    const raum = r.data;
+    state.raum = raum;
+    document.getElementById('room-name').textContent = raum.name || raum.id;
+    document.getElementById('room-sub').textContent = (raum.eigenschaften || []).join(' · ') || '';
+    const list = document.getElementById('tables-list');
+    list.innerHTML = '';
+    (raum.tische || []).forEach(t => {
+      const div = document.createElement('div');
+      div.className = 'item';
+      const memberNames = (t.names || []).join(', ');
+      div.innerHTML = `
+        <div style="flex:1;">
+          <div class="item-name">${escapeHtml(t.thema || '??')} · ${t.members}/${t.max}</div>
+          <div class="item-sub">${escapeHtml(memberNames || '(leer)')}</div>
+          <div class="item-meta">${escapeHtml(t.energie_label || '')} · ${escapeHtml(t.valenz || '')}</div>
+        </div>
+      `;
+      div.onclick = () => joinTisch(t);
+      list.appendChild(div);
+    });
+    if (!raum.tische || raum.tische.length === 0) {
+      list.innerHTML = '<div class="loading">Keine Tische</div>';
+    }
+  } catch(e) {
+    toast('Fehler: ' + e.message);
+  }
+}
+
+async function joinTisch(tisch) {
+  if (state.user && state.user.is_guest) { toast('Gäste können nicht setzen. Login nötig.'); return; }
+  try {
+    const r = await api('/api/tisch/join', {method: 'POST', body: {tisch_id: tisch.id}});
+    if (r.data && r.data.ok) {
+      state.tisch = tisch;
+      state.chatSince = 0;
+      go('chat');
+      document.getElementById('chat-title').textContent = `${tisch.thema || ''} · Tisch`;
+      document.getElementById('chat-sub').textContent = (tisch.names || []).join(', ');
+      document.getElementById('chat-messages').innerHTML = '';
+      startChatPoll();
+    } else {
+      toast(r.data.error || 'Fehler');
+    }
+  } catch(e) {
+    toast('Fehler: ' + e.message);
+  }
+}
+
+async function leaveTisch() {
+  if (state.tisch) {
+    try { await api('/api/tisch/leave', {method: 'POST', body: {tisch_id: state.tisch.id}}); } catch(_){}
+  }
+  state.tisch = null;
+  if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+  go('room');
+  loadRoom();
+}
+
+// ============================================================
+// CHAT
+// ============================================================
+function startChatPoll() {
+  pollChat();
+  if (state.pollTimer) clearInterval(state.pollTimer);
+  state.pollTimer = setInterval(pollChat, 3000);
+}
+
+async function pollChat() {
+  if (!state.tisch) return;
+  try {
+    const r = await api(`/api/chat/poll/${state.tisch.id}?since=${state.chatSince}`);
+    if (!Array.isArray(r.data)) return;
+    const container = document.getElementById('chat-messages');
+    const wasAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
+    r.data.forEach(m => {
+      if (m.time > state.chatSince) state.chatSince = m.time;
+      const div = document.createElement('div');
+      const isSelf = state.user && m.user === state.user.name;
+      if (m.system) {
+        div.style.cssText = 'text-align:center; color:#665540; font-size:11px; font-style:italic; padding:4px;';
+        div.textContent = m.text;
+      } else {
+        div.className = 'chat-msg ' + (isSelf ? 'self' : 'other');
+        const timeStr = m.time ? new Date(m.time*1000).toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'}) : '';
+        div.innerHTML = `
+          <div class="msg-name">${escapeHtml(m.user)}</div>
+          <div class="msg-text">${escapeHtml(m.text || '')}</div>
+          <div class="msg-time">${timeStr}</div>
+        `;
+      }
+      container.appendChild(div);
+    });
+    if (wasAtBottom) container.scrollTop = container.scrollHeight;
+  } catch(_) {}
+}
+
+async function sendMsg() {
+  const input = document.getElementById('chat-input');
+  const text = input.value.trim();
+  if (!text || !state.tisch) return;
+  input.value = '';
+  try {
+    const r = await api('/api/chat/send', {method: 'POST', body: {tisch_id: state.tisch.id, text}});
+    if (r.data && !r.data.ok) toast(r.data.error || 'Fehler');
+  } catch(e) { toast('Fehler: ' + e.message); }
+}
+
+// ============================================================
+// INIT
+// ============================================================
 renderFavs();
+go('start');
 </script>
 </body>
 </html>
