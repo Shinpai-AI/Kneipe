@@ -3,22 +3,25 @@
   "appName": "Kneipenschlaegerei",
   "webDir": "www",
   "server": {
-    "hostname": "bar.shinpai.de",
     "androidScheme": "https",
-    "cleartext": false,
-    "allowNavigation": [
-      "*.shinpai.de",
-      "bar.shinpai.de"
-    ]
+    "cleartext": true,
+    "allowNavigation": ["*"]
   },
   "android": {
-    "allowMixedContent": false,
+    "allowMixedContent": true,
     "webContentsDebuggingEnabled": false
   },
   "plugins": {
     "Keyboard": {
-      "resize": "body",
-      "resizeOnFullScreen": true
+      "resize": "native",
+      "resizeOnFullScreen": true,
+      "style": "DARK"
+    },
+    "CapacitorHttp": {
+      "enabled": true
+    },
+    "CapacitorCookies": {
+      "enabled": true
     }
   }
 }
