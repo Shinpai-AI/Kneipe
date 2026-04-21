@@ -109,8 +109,76 @@ jobs:
           name: Kneipe-Windows-Setup
           path: Output/*.exe
 
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Capacitor dependencies
+        working-directory: installer/Android
+        run: npm install
+
+      - name: Capacitor sync
+        working-directory: installer/Android
+        run: npx cap sync android
+
+      - name: Build unsigned release APK
+        working-directory: installer/Android/android
+        run: ./gradlew assembleRelease
+
+      - name: Sign APK (if keystore secret set)
+        if: ${{ env.KEYSTORE_BASE64 != '' }}
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > kneipe.keystore
+          BUILD_TOOLS=$(ls $ANDROID_HOME/build-tools | sort -V | tail -1)
+          APKSIGNER="$ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner"
+          ZIPALIGN="$ANDROID_HOME/build-tools/$BUILD_TOOLS/zipalign"
+          cd installer/Android/android/app/build/outputs/apk/release
+          $ZIPALIGN -v -p 4 app-release-unsigned.apk Kneipe-aligned.apk
+          $APKSIGNER sign --ks ../../../../../../../../kneipe.keystore \
+            --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass pass:"$KEYSTORE_PASSWORD" \
+            --key-pass pass:"$KEY_PASSWORD" \
+            --out Kneipe.apk Kneipe-aligned.apk
+
+      - name: Collect APK
+        run: |
+          mkdir -p apk-out
+          SIGNED=$(find installer/Android/android/app/build/outputs/apk/release -name "Kneipe.apk" | head -1)
+          UNSIGNED=$(find installer/Android/android/app/build/outputs/apk/release -name "app-release-unsigned.apk" | head -1)
+          if [ -n "$SIGNED" ]; then
+            cp "$SIGNED" apk-out/Kneipe.apk
+          else
+            cp "$UNSIGNED" apk-out/Kneipe-unsigned.apk
+          fi
+          ls -la apk-out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Kneipe-Android-APK
+          path: apk-out/*.apk
+
   release:
-    needs: [build-linux, build-windows]
+    needs: [build-linux, build-windows, build-android]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
@@ -122,12 +190,36 @@ jobs:
           files: |
             Kneipe-Linux-AppImage/Kneipe-x86_64.AppImage
             Kneipe-Windows-Setup/*.exe
+            Kneipe-Android-APK/*.apk
           generate_release_notes: true
           body: |
-            ## Installation
+            ## 🍻 Komm rein, die Tür steht offen.
 
-            ### Linux
-            Download `Kneipe-x86_64.AppImage`, make executable (`chmod +x`), run it. Zenity installer dialog guides you through setup.
+            ### 🐧 Linux
+            `Kneipe-x86_64.AppImage` laden, `chmod +x` drauf, doppelklicken. Der Wirt öffnet die Tür, der Installer-Dialog führt dich durch den Rest. Keine Installationsorgie, kein Paketmanager-Gedöns.
 
-            ### Windows
-            Download `Kneipe-Setup.exe` and run it. Includes embedded Python — no system Python needed. Configures firewall, creates desktop shortcut and system tray icon.
+            ### 🪟 Windows
+            `Kneipe-Setup.exe` doppelklicken. Python liegt eingepackt im Koffer, kein System-Python nötig. Firewall-Regel, Desktop-Shortcut und System-Tray-Icon kommen gratis mit.
+
+            ### 🤖 Android
+            `Kneipe.apk` (oder `Kneipe-unsigned.apk`) runterladen, "Installation aus unbekannten Quellen" erlauben, antippen. Mikrofon beim ersten Start freigeben. Foreground-Service hält die Kneipe wach, auch wenn du in der Küche bist.
+
+            ---
+
+            ## 🔨 Was sich geändert hat
+
+            - **Argon2id + Salzstreuer** — Login-Tür hat jetzt ne Panzerbremse statt ein Bindfaden-Schloss.
+            - **setsid start.sh** — der Server geht seinen eigenen Weg, wenn Systemd durchdreht. Saubere Trennung, kein Chaos bei Neustart.
+            - **Voice-Queue entlastet** — wenn zu viele gleichzeitig reden, gibts nen freundlichen Überlauf-Hinweis statt Aussetzer.
+            - **Broadcast-Fix** — Voice-Input in Tresen und Durchsage läuft jetzt einmal durch Whisper und landet sauber in allen Kanälen. Vorher: N parallele Transkripte, haben sich gegenseitig erwürgt.
+            - **Android-APK** — neu dabei. Die Kneipe in der Hosentasche, wohin du willst.
+
+            ---
+
+            ## 🪑 Einladung
+
+            Der Tresen hat Platz für dich. 30 Gäste pro Tisch, Barkeeper hört zu, Bierdeckel fliegen wenn was Schönes gesagt wird. Themen auf der Wand, du wählst eins und kippst raus was sonst zu Hause liegenbleiben würde.
+
+            👉 https://bar.shinpai.de
+
+            *Ist einfach passiert. 🐉🍺*

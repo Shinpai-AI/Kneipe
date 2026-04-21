@@ -9,3 +9,19 @@ voices/
 venv/
 .server.pid
 themen_json/
+
+# Capacitor / Android App build artifacts
+installer/Android/node_modules/
+installer/Android/android/build/
+installer/Android/android/.gradle/
+installer/Android/android/app/build/
+installer/Android/android/local.properties
+installer/Android/android/app/release/
+installer/Android/android/.idea/
+installer/Android/android/captures/
+installer/Android/android/app/google-services.json
+installer/Android/www/build/
+*.keystore
+*.jks
+release/*.apk
+release/*.aab
