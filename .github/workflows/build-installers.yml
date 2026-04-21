@@ -138,7 +138,9 @@ jobs:
 
       - name: Build unsigned release APK
         working-directory: installer/Android/android
-        run: ./gradlew assembleRelease
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleRelease
 
       - name: Sign APK (if keystore secret set)
         if: ${{ env.KEYSTORE_BASE64 != '' }}
