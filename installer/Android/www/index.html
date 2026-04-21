@@ -84,8 +84,9 @@ h2 { font-size: 14px; color: #d4a850; margin-bottom: 8px; }
       <input id="login-password" type="password" placeholder="Passwort" autocomplete="current-password">
     </div>
     <button class="primary" onclick="doLogin()">Anmelden</button>
-    <div style="margin-top: 14px; text-align: center;">
-      <button class="ghost" onclick="doGuest()">Als Gast reinschauen</button>
+    <div style="margin-top: 14px; display: flex; gap: 8px; justify-content: center;">
+      <button class="ghost" onclick="doGuest()">Als Gast</button>
+      <button class="ghost" onclick="doNexusLogin()">🛡️ ShinNexus-Login</button>
     </div>
     <div id="login-msg" style="color:#a33; font-size: 12px; margin-top: 12px; text-align: center;"></div>
   </div>
@@ -99,6 +100,7 @@ h2 { font-size: 14px; color: #d4a850; margin-bottom: 8px; }
       <div class="title">Räume</div>
       <div class="sub" id="rooms-user-info"></div>
     </div>
+    <button class="ghost" onclick="editProfile()">👤</button>
     <button class="ghost" onclick="loadRooms()">↻</button>
   </div>
   <div class="content">
@@ -288,6 +290,43 @@ async function doLogin() {
   }
 }
 
+async function doNexusLogin() {
+  const nexus = prompt('ShinNexus-URL (z.B. https://mein-nexus.de):');
+  if (!nexus) return;
+  const u = document.getElementById('login-username').value.trim();
+  const p = document.getElementById('login-password').value;
+  if (!u || !p) { toast('Bitte vorher Name + Passwort eintragen'); return; }
+  const msg = document.getElementById('login-msg');
+  msg.style.color = '#887755';
+  msg.textContent = 'Nexus-Login…';
+  try {
+    const r = await api('/api/nexus/login', {method: 'POST', body: {nexus_url: nexus, username: u, password: p}});
+    if (r.data && r.data.ok) {
+      state.user = {name: u, is_guest: false, via_nexus: true};
+      msg.textContent = '';
+      loadRooms();
+    } else if (r.data && r.data.need_2fa) {
+      const totp = prompt('TOTP-Code (6 Ziffern):');
+      if (!totp) return;
+      const r2 = await api('/api/nexus/login', {method: 'POST', body: {nexus_url: nexus, username: u, password: p, totp_code: totp}});
+      if (r2.data && r2.data.ok) {
+        state.user = {name: u, is_guest: false, via_nexus: true};
+        msg.textContent = '';
+        loadRooms();
+      } else {
+        msg.style.color = '#a33';
+        msg.textContent = (r2.data && r2.data.error) || 'Login fehlgeschlagen';
+      }
+    } else {
+      msg.style.color = '#a33';
+      msg.textContent = (r.data && r.data.error) || 'Login fehlgeschlagen';
+    }
+  } catch(e) {
+    msg.style.color = '#a33';
+    msg.textContent = 'Fehler: ' + e.message;
+  }
+}
+
 async function doGuest() {
   // Gast: Raum-Liste ist offen, Login nur für Senden nötig
   state.user = {name: '(Gast)', is_guest: true};
@@ -429,7 +468,16 @@ async function pollChat() {
       const isSelf = state.user && m.user === state.user.name;
       if (m.system) {
         div.style.cssText = 'text-align:center; color:#665540; font-size:11px; font-style:italic; padding:4px;';
-        div.textContent = m.text;
+        if (m.bierdeckel_id) {
+          const age = (Date.now()/1000) - m.time;
+          if (age < 35) {
+            div.innerHTML = `${escapeHtml(m.text)} <button onclick="prost('${m.bierdeckel_id}', this)" style="background:#d4a850;color:#0a0a0a;border:none;border-radius:4px;padding:3px 10px;font-size:11px;cursor:pointer;font-weight:bold;margin-left:6px;">PROST! 🍺</button>`;
+          } else {
+            div.textContent = m.text + ' ✅';
+          }
+        } else {
+          div.textContent = m.text;
+        }
       } else {
         const isOwnerVoice = !!m.is_owner_voice;
         div.className = 'chat-msg ' + (isSelf ? 'self' : 'other');
@@ -453,6 +501,33 @@ async function pollChat() {
     });
     if (wasAtBottom) container.scrollTop = container.scrollHeight;
   } catch(_) {}
+}
+
+async function editProfile() {
+  if (!state.user) { toast('Erst einloggen'); return; }
+  const voices = ['de-DE-ConradNeural','de-DE-KatjaNeural','de-DE-AmalaNeural','de-DE-BerndNeural','de-DE-ChristophNeural','de-DE-ElkeNeural','de-DE-FlorianNeural','de-DE-GiselaNeural','de-DE-KasperNeural','de-DE-KillianNeural','de-DE-KlarissaNeural','de-DE-KlausNeural','de-DE-LouisaNeural','de-DE-MajaNeural','de-DE-RalfNeural','de-DE-SeraphinaNeural'];
+  const pick = prompt('TTS-Stimme wählen (aus: Conrad, Katja, Amala, Bernd, Christoph, Elke, Florian, Gisela, Kasper, Killian, Klarissa, Klaus, Louisa, Maja, Ralf, Seraphina):\n\nEinfach Name tippen (z.B. Katja):');
+  if (!pick) return;
+  const match = voices.find(v => v.toLowerCase().includes(pick.toLowerCase()));
+  if (!match) { toast('Stimme nicht gefunden'); return; }
+  try {
+    const r = await api('/api/profile', {method: 'POST', body: {tts_voice: match}});
+    if (r.data && r.data.ok) toast('✅ Stimme: ' + match);
+    else toast(r.data.error || 'Fehler');
+  } catch(e) { toast(e.message); }
+}
+
+async function prost(bierdeckelId, btn) {
+  try {
+    const r = await api('/api/bierdeckel/prost', {method: 'POST', body: {bd_id: bierdeckelId}});
+    if (r.data && r.data.ok) {
+      btn.textContent = '✅';
+      btn.disabled = true;
+      btn.style.background = '#4a8a4a';
+    } else {
+      toast(r.data.error || 'Prost-Fehler');
+    }
+  } catch(e) { toast(e.message); }
 }
 
 async function sendMsg() {
