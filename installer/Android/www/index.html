@@ -137,7 +137,7 @@ h2 { font-size: 14px; color: #d4a850; margin-bottom: 8px; }
   <div class="chat-messages" id="chat-messages"></div>
   <div class="chat-input-row">
     <input id="chat-input" placeholder="Nachricht" onkeydown="if(event.key==='Enter') sendMsg()">
-    <button id="btn-rec" onclick="toggleRecording()" style="background:none;border:1px solid #3a3020;color:#887755;padding:10px;border-radius:8px;cursor:pointer;font-size:18px;">🎤</button>
+    <button id="btn-rec" onclick="toggleVoice()" style="background:none;border:1px solid #3a3020;color:#887755;padding:10px;border-radius:8px;cursor:pointer;font-size:18px;">🎙️</button>
     <button class="primary" onclick="sendMsg()">Senden</button>
   </div>
 </div>
@@ -280,7 +280,7 @@ async function doLogin() {
   try {
     const r = await api('/api/login', {method: 'POST', body: {name: u, password: p}});
     if (r.data && r.data.ok) {
-      state.user = {name: u, is_guest: false, token: r.data.token};
+      state.user = {name: u, is_guest: false, token: r.data.token, user_id: (r.data.user && r.data.user.id) || null};
       msg.textContent = '';
       loadRooms();
     } else {
@@ -305,7 +305,7 @@ async function doNexusLogin() {
   try {
     const r = await api('/api/nexus/login', {method: 'POST', body: {nexus_url: nexus, username: u, password: p}});
     if (r.data && r.data.ok) {
-      state.user = {name: u, is_guest: false, via_nexus: true, token: r.data.token};
+      state.user = {name: u, is_guest: false, via_nexus: true, token: r.data.token, user_id: (r.data.user && r.data.user.id) || null};
       msg.textContent = '';
       loadRooms();
     } else if (r.data && r.data.need_2fa) {
@@ -313,7 +313,7 @@ async function doNexusLogin() {
       if (!totp) return;
       const r2 = await api('/api/nexus/login', {method: 'POST', body: {nexus_url: nexus, username: u, password: p, totp_code: totp}});
       if (r2.data && r2.data.ok) {
-        state.user = {name: u, is_guest: false, via_nexus: true, token: r2.data.token};
+        state.user = {name: u, is_guest: false, via_nexus: true, token: r2.data.token, user_id: (r2.data.user && r2.data.user.id) || null};
         msg.textContent = '';
         loadRooms();
       } else {
@@ -445,6 +445,9 @@ async function leaveTisch() {
   }
   state.tisch = null;
   if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+  // Voice-Queue + Recording resetten
+  try { _sessionVoiceQueue.reset(); _globalVoiceQueue.reset(); } catch(_){}
+  if (_voiceActive) { try { toggleVoice(); } catch(_){} }
   go('room');
   loadRoom();
 }
@@ -465,8 +468,14 @@ async function pollChat() {
     if (!Array.isArray(r.data)) return;
     const container = document.getElementById('chat-messages');
     const wasAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
+    const freshCut = state.chatSince || 0;
     r.data.forEach(m => {
+      const isFresh = m.time > freshCut;
       if (m.time > state.chatSince) state.chatSince = m.time;
+      // Autoplay neue Voice-Messages (nur frische, nicht initial beim Join)
+      if (isFresh && freshCut > 0 && !m.system && (m.tts_url || (m.file_url && m.filetype && m.filetype.startsWith('audio/')))) {
+        try { registerIncomingTrack(m); } catch(_){}
+      }
       const div = document.createElement('div');
       const isSelf = state.user && m.user === state.user.name;
       if (m.system) {
@@ -545,18 +554,291 @@ async function sendMsg() {
 }
 
 // ============================================================
-// AUDIO PLAYER
+// AUDIO PLAYER — Kneipe-Architektur portiert (GlobalQueue + SessionQueue + VAD + Recognition)
 // ============================================================
-let _currentAudio = null;
+
+let _ttsPlaying = false;
+let _chatMuted = false;
+let _lastTtsTexts = [];  // Echo-Gate: letzte TTS-Texte (max 5) für Recognition-Filter
+
+// --- GLOBAL VOICE QUEUE (Overload-Tracker, spielt NICHT ab) ---
+const _globalVoiceQueue = {
+  items: [],
+  windowSeconds: 30,
+  overloadThreshold: 20,
+  overloadActive: false,
+  push(msg) {
+    const now = Date.now() / 1000;
+    this.items.push({user: msg.user||'', user_id: msg.user_id||'', url: msg.url||'', time: now});
+    const cutoff = now - this.windowSeconds;
+    this.items = this.items.filter(i => i.time >= cutoff);
+    if (!this.overloadActive && this.items.length > this.overloadThreshold) {
+      this.overloadActive = true;
+      toast('🍺 Kneipen-Pause — zu viele Stimmen', 4000);
+    } else if (this.overloadActive && this.items.length < Math.floor(this.overloadThreshold/2)) {
+      this.overloadActive = false;
+    }
+  },
+  reset() { this.items = []; this.overloadActive = false; }
+};
+
+// --- SESSION VOICE QUEUE (gefiltert, spielt ab) ---
+const _sessionVoiceQueue = {
+  items: [],
+  maxSize: 20,
+  playing: null,
+  paused: false,
+  _currentAudio: null,
+  add(url) {
+    if (this.items.length >= this.maxSize) return false;
+    this.items.push(url);
+    this._playNext();
+    return true;
+  },
+  pause() {
+    this.paused = true;
+    if (this._currentAudio) { try { this._currentAudio.pause(); } catch(_){} }
+  },
+  resume() {
+    if (!this.paused) return;
+    this.paused = false;
+    if (this._currentAudio && this.playing) {
+      this._currentAudio.play().catch(()=>{});
+    } else {
+      this._playNext();
+    }
+  },
+  _playNext() {
+    if (this.playing || this.paused) return;
+    if (this.items.length === 0 || _chatMuted) { this.playing = null; return; }
+    const url = this.items.shift();
+    this.playing = url;
+    _ttsPlaying = true;
+    const audio = new Audio(url);
+    this._currentAudio = audio;
+    let handled = false;
+    const finish = () => {
+      if (handled) return; handled = true;
+      _ttsPlaying = false;
+      _voiceChunks = [];
+      this.playing = null;
+      this._currentAudio = null;
+      if (!this.paused) this._playNext();
+    };
+    audio.onended = finish;
+    audio.onerror = finish;
+    audio.play().catch(() => {
+      setTimeout(() => audio.play().catch(finish), 500);
+    });
+    setTimeout(() => { if (this.playing === url) finish(); }, 30000);
+  },
+  reset() {
+    this.items = [];
+    this.playing = null;
+    this.paused = false;
+    if (this._currentAudio) { try { this._currentAudio.pause(); } catch(_){} this._currentAudio = null; }
+  }
+};
+
+// --- Zentrale Eintrittspforte für eingehende Voice-Tracks ---
+function registerIncomingTrack(msg) {
+  if (!msg || !state.server) return;
+  const src = (msg.file_url && msg.filetype && msg.filetype.startsWith('audio/')) ? msg.file_url : msg.tts_url;
+  if (!src) return;
+  const url = state.server.url + src;
+  _globalVoiceQueue.push({user: msg.user, user_id: msg.user_id, url: url});
+  // Echo-Gate: letzte TTS-Texte merken (max 5, nur für Orpheus-Voice)
+  if (msg.tts_url && msg.text) {
+    _lastTtsTexts.push(msg.text);
+    if (_lastTtsTexts.length > 5) _lastTtsTexts.shift();
+  }
+  // Eigen-Filter
+  const isOwn = state.user && (
+    (msg.user_id && state.user.user_id && msg.user_id === state.user.user_id) ||
+    (msg.user && state.user.name && msg.user === state.user.name)
+  );
+  if (isOwn) return;
+  if (_chatMuted) return;
+  if (_globalVoiceQueue.overloadActive) return;
+  _sessionVoiceQueue.add(url);
+}
+
+// Manueller Play-Button (Fallback wenn Autoplay nicht greift oder User erneut hören will)
 function playAudio(btn) {
-  if (_currentAudio) { try { _currentAudio.pause(); } catch(_){} }
-  document.querySelectorAll('[data-src]').forEach(b => b.textContent = '▶️');
-  if (btn.textContent === '⏸️') { _currentAudio = null; btn.textContent = '▶️'; return; }
   const src = btn.dataset.src;
-  _currentAudio = new Audio(src);
-  _currentAudio.play().catch(e => toast('Audio Fehler: ' + e.message));
+  if (!src) return;
+  const a = new Audio(src);
   btn.textContent = '⏸️';
-  _currentAudio.onended = () => { btn.textContent = '▶️'; _currentAudio = null; };
+  a.onended = () => { btn.textContent = '▶️'; };
+  a.onerror = () => { btn.textContent = '▶️'; };
+  a.play().catch(e => { btn.textContent = '▶️'; toast('Audio Fehler: ' + e.message); });
+}
+
+// ============================================================
+// VOICE INPUT — VAD + Recognition (Kneipe-Architektur)
+// ============================================================
+let _voiceActive = false;
+let _voiceStream = null;
+let _recognition = null;
+let _voiceRecorder = null;
+let _voiceChunks = [];
+let _vadTimer = null;
+let _vadAnalyser = null;
+let _vadFreqData = null;
+let _vadIsLoud = false;
+let _vadSilenceSince = 0;
+let _vadMimeType = 'audio/webm';
+let _vadRunning = false;
+let _vadAudioCtx = null;
+
+async function toggleVoice() {
+  const btn = document.getElementById('btn-rec');
+  if (!state.tisch) { toast('Erst an einen Tisch setzen'); return; }
+
+  if (_voiceActive) {
+    // AUS
+    _voiceActive = false;
+    _vadRunning = false;
+    if (_vadTimer) { clearInterval(_vadTimer); _vadTimer = null; }
+    if (_recognition) { try { _recognition.abort(); } catch(_){} _recognition = null; }
+    if (_voiceRecorder && _voiceRecorder.state === 'recording') { try { _voiceRecorder.stop(); } catch(_){} }
+    if (_voiceStream) { try { _voiceStream.getTracks().forEach(t => t.stop()); } catch(_){} _voiceStream = null; }
+    if (_vadAudioCtx) { try { _vadAudioCtx.close(); } catch(_){} _vadAudioCtx = null; }
+    btn.textContent = '🎙️';
+    btn.style.borderColor = '#3a3020';
+    btn.style.color = '#887755';
+    return;
+  }
+
+  // AN
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  try {
+    _voiceStream = await navigator.mediaDevices.getUserMedia({audio: true});
+  } catch(e) {
+    toast('Mic nicht verfügbar: ' + e.message);
+    return;
+  }
+  _voiceActive = true;
+  btn.textContent = '🔴';
+  btn.style.borderColor = '#e44';
+  btn.style.color = '#e44';
+  _startVAD();
+  if (SR) _startRecognition();
+  else toast('🎤 Aufnahme an (ohne Transkription)', 3000);
+}
+
+function _startVAD() {
+  if (_vadRunning) return;
+  _vadRunning = true;
+  _vadMimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4';
+  _vadAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (_vadAudioCtx.state === 'suspended') _vadAudioCtx.resume();
+  const src = _vadAudioCtx.createMediaStreamSource(_voiceStream);
+  _vadAnalyser = _vadAudioCtx.createAnalyser();
+  _vadAnalyser.fftSize = 512;
+  src.connect(_vadAnalyser);
+  _vadFreqData = new Uint8Array(_vadAnalyser.frequencyBinCount);
+  _vadTimer = setInterval(_vadLoop, 16);
+}
+
+function _vadLoop() {
+  if (!_voiceActive) { _vadRunning = false; clearInterval(_vadTimer); _vadTimer = null; return; }
+  _vadAnalyser.getByteFrequencyData(_vadFreqData);
+  const avg = _vadFreqData.reduce((a,b) => a+b, 0) / _vadFreqData.length;
+  const queueActive = _sessionVoiceQueue.playing || _sessionVoiceQueue.paused || _sessionVoiceQueue.items.length > 0;
+  if (avg > 8) {
+    _vadSilenceSince = 0;
+    if (!_vadIsLoud && !queueActive) {
+      _vadIsLoud = true;
+      _sessionVoiceQueue.pause();
+      _voiceChunks = [];
+      try {
+        _voiceRecorder = new MediaRecorder(_voiceStream, {mimeType: _vadMimeType});
+        _voiceRecorder.ondataavailable = e => { if (e.data.size > 0) _voiceChunks.push(e.data); };
+        _voiceRecorder.start(100);
+      } catch(_){}
+    }
+  } else if (_vadIsLoud) {
+    if (!_vadSilenceSince) _vadSilenceSince = Date.now();
+    if (Date.now() - _vadSilenceSince > 800) {
+      _vadIsLoud = false;
+      if (_voiceRecorder && _voiceRecorder.state === 'recording') { try { _voiceRecorder.stop(); } catch(_){} }
+      _sessionVoiceQueue.resume();
+    }
+  }
+}
+
+function _startRecognition() {
+  if (!_voiceActive) return;
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return;
+  if (_recognition) { try { _recognition.abort(); } catch(_){} _recognition = null; }
+  _recognition = new SR();
+  _recognition.lang = 'de-DE';
+  _recognition.continuous = true;
+  _recognition.interimResults = false;
+  const chunkTimer = setTimeout(() => {
+    if (_voiceActive && _recognition) { try { _recognition.stop(); } catch(_){} }
+  }, 60000);
+  _recognition.onresult = (e) => {
+    const last = e.results[e.results.length - 1];
+    if (!last.isFinal) return;
+    // Ignorieren solange Queue spielt UND nicht pausiert UND keine Chunks (= kein echter User-Input, nur Eigen-TTS-Echo)
+    if (_ttsPlaying && !_sessionVoiceQueue.paused && _voiceChunks.length === 0) return;
+    const text = last[0].transcript.trim();
+    if (!text) return;
+    // Echo-Gate: Wort-Overlap mit letzten TTS-Texten
+    if (_lastTtsTexts.length > 0) {
+      const words = text.toLowerCase().replace(/[^a-zäöüß\s]/g, '').split(/\s+/).filter(w => w.length > 2);
+      if (words.length > 0) {
+        for (const tts of _lastTtsTexts) {
+          const ttsWords = tts.toLowerCase().replace(/[^a-zäöüß\s]/g, '').split(/\s+/).filter(w => w.length > 2);
+          if (ttsWords.length > 0) {
+            const overlap = words.filter(w => ttsWords.includes(w)).length;
+            if (overlap / words.length >= 0.6) return;  // Echo geblockt
+          }
+        }
+      }
+    }
+    clearTimeout(chunkTimer);
+    const chunks = [..._voiceChunks];
+    _voiceChunks = [];
+    if (_voiceRecorder && _voiceRecorder.state === 'recording') { try { _voiceRecorder.stop(); } catch(_){} }
+    _vadIsLoud = false;
+    _sessionVoiceQueue.resume();
+    _sendVoiceMessage(text, chunks);
+  };
+  _recognition.onerror = (e) => {
+    if (e.error === 'no-speech') return;
+  };
+  _recognition.onend = () => {
+    if (_voiceActive) setTimeout(() => { if (_voiceActive) _startRecognition(); }, 300);
+  };
+  try { _recognition.start(); } catch(_){}
+}
+
+async function _sendVoiceMessage(text, chunks) {
+  if (!state.tisch) return;
+  if (!text && chunks.length === 0) return;
+  let voiceB64 = '';
+  if (chunks.length > 0) {
+    const blob = new Blob(chunks, {type: _vadMimeType});
+    if (blob.size > 2000) {
+      voiceB64 = await new Promise(res => {
+        const fr = new FileReader();
+        fr.onload = () => res(fr.result);
+        fr.readAsDataURL(blob);
+      });
+    }
+  }
+  try {
+    await api('/api/chat/send', {method: 'POST', body: {
+      tisch_id: state.tisch.id,
+      text: text,
+      voice: voiceB64 || undefined,
+      voice_input: !!voiceB64,
+    }});
+  } catch(e) { toast('Send-Fehler: ' + e.message); }
 }
 
 // ============================================================
@@ -584,58 +866,6 @@ function renderMembers() {
   }).join('');
 }
 
-// ============================================================
-// VOICE RECORDING
-// ============================================================
-let _recState = { recorder: null, chunks: [], stream: null, recognizer: null, transcript: '' };
-
-async function toggleRecording() {
-  const btn = document.getElementById('btn-rec');
-  if (_recState.recorder) {
-    // Stoppen + senden
-    _recState.recorder.stop();
-    return;
-  }
-  try {
-    _recState.stream = await navigator.mediaDevices.getUserMedia({audio: true});
-  } catch(e) { toast('Mic nicht verfügbar: ' + e.message); return; }
-  _recState.chunks = [];
-  _recState.transcript = '';
-  _recState.recorder = new MediaRecorder(_recState.stream, {mimeType: 'audio/webm'});
-  _recState.recorder.ondataavailable = e => { if (e.data && e.data.size > 0) _recState.chunks.push(e.data); };
-  _recState.recorder.onstop = async () => {
-    if (_recState.recognizer) { try { _recState.recognizer.stop(); } catch(_){} }
-    await new Promise(r => setTimeout(r, 300));
-    if (_recState.stream) _recState.stream.getTracks().forEach(t => t.stop());
-    btn.textContent = '🎤'; btn.style.color = '#887755';
-    if (!_recState.chunks.length) { _recState.recorder = null; return; }
-    const blob = new Blob(_recState.chunks, {type: 'audio/webm'});
-    const b64 = await new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(blob); });
-    const text = _recState.transcript;
-    _recState.recorder = null; _recState.chunks = [];
-    try {
-      const r = await api('/api/chat/send', {method: 'POST', body: {tisch_id: state.tisch.id, text: text || '', voice: b64, voice_input: true}});
-      if (r.data && !r.data.ok) toast(r.data.error || 'Send-Fehler');
-    } catch(e) { toast('Fehler: ' + e.message); }
-  };
-  // Speech Recognition parallel
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (SR) {
-    _recState.recognizer = new SR();
-    _recState.recognizer.lang = 'de-DE';
-    _recState.recognizer.continuous = true;
-    _recState.recognizer.interimResults = false;
-    _recState.recognizer.onresult = e => {
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        if (e.results[i].isFinal) _recState.transcript += (_recState.transcript ? ' ' : '') + e.results[i][0].transcript.trim();
-      }
-    };
-    try { _recState.recognizer.start(); } catch(_) {}
-  }
-  _recState.recorder.start();
-  btn.textContent = '⏹️'; btn.style.color = '#e55';
-  toast('🎤 Aufnahme läuft. Nochmal tippen zum Senden.', 3500);
-}
 
 // ============================================================
 // INIT
