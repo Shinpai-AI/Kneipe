@@ -142,36 +142,49 @@ jobs:
           chmod +x ./gradlew
           ./gradlew assembleRelease
 
-      - name: Sign APK (if keystore secret set)
-        if: ${{ env.KEYSTORE_BASE64 != '' }}
+      - name: Sign APK (release keystore or debug fallback)
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          echo "$KEYSTORE_BASE64" | base64 -d > kneipe.keystore
           BUILD_TOOLS=$(ls $ANDROID_HOME/build-tools | sort -V | tail -1)
           APKSIGNER="$ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner"
           ZIPALIGN="$ANDROID_HOME/build-tools/$BUILD_TOOLS/zipalign"
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > kneipe.keystore
+            KEYSTORE_PATH="$(pwd)/kneipe.keystore"
+            KS_PASS="$KEYSTORE_PASSWORD"
+            K_ALIAS="$KEY_ALIAS"
+            K_PASS="$KEY_PASSWORD"
+            echo "🔐 Signing with RELEASE keystore"
+          else
+            echo "🛠️  No KEYSTORE_BASE64 secret set — falling back to DEBUG keystore"
+            keytool -genkey -v -noprompt \
+              -keystore kneipe-debug.keystore \
+              -alias kneipe-debug \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass androiddebug -keypass androiddebug \
+              -dname "CN=Shinpai-AI Debug, O=Shinpai-AI, C=DE"
+            KEYSTORE_PATH="$(pwd)/kneipe-debug.keystore"
+            KS_PASS="androiddebug"
+            K_ALIAS="kneipe-debug"
+            K_PASS="androiddebug"
+          fi
           cd installer/Android/android/app/build/outputs/apk/release
           $ZIPALIGN -v -p 4 app-release-unsigned.apk Kneipe-aligned.apk
-          $APKSIGNER sign --ks ../../../../../../../../kneipe.keystore \
-            --ks-key-alias "$KEY_ALIAS" \
-            --ks-pass pass:"$KEYSTORE_PASSWORD" \
-            --key-pass pass:"$KEY_PASSWORD" \
+          $APKSIGNER sign --ks "$KEYSTORE_PATH" \
+            --ks-key-alias "$K_ALIAS" \
+            --ks-pass pass:"$KS_PASS" \
+            --key-pass pass:"$K_PASS" \
             --out Kneipe.apk Kneipe-aligned.apk
 
       - name: Collect APK
         run: |
           mkdir -p apk-out
           SIGNED=$(find installer/Android/android/app/build/outputs/apk/release -name "Kneipe.apk" | head -1)
-          UNSIGNED=$(find installer/Android/android/app/build/outputs/apk/release -name "app-release-unsigned.apk" | head -1)
-          if [ -n "$SIGNED" ]; then
-            cp "$SIGNED" apk-out/Kneipe.apk
-          else
-            cp "$UNSIGNED" apk-out/Kneipe-unsigned.apk
-          fi
+          cp "$SIGNED" apk-out/Kneipe.apk
           ls -la apk-out/
 
       - uses: actions/upload-artifact@v4
