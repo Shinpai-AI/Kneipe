@@ -14,5 +14,11 @@
   "android": {
     "allowMixedContent": false,
     "webContentsDebuggingEnabled": false
+  },
+  "plugins": {
+    "Keyboard": {
+      "resize": "body",
+      "resizeOnFullScreen": true
+    }
   }
 }
