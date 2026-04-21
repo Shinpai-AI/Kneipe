@@ -3,9 +3,13 @@
   "appName": "Kneipenschlaegerei",
   "webDir": "www",
   "server": {
-    "url": "https://bar.shinpai.de",
     "androidScheme": "https",
-    "cleartext": false
+    "cleartext": false,
+    "allowNavigation": [
+      "*.shinpai.de",
+      "bar.shinpai.de",
+      "*"
+    ]
   },
   "android": {
     "allowMixedContent": false,

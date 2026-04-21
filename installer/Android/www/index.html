@@ -2,10 +2,144 @@
 <html lang="de">
 <head>
   <meta charset="UTF-8">
-  <title>Kneipenschlaegerei</title>
-  <meta http-equiv="refresh" content="0; url=https://bar.shinpai.de">
+  <title>Kneipenschlägerei</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100%; font-family: 'Segoe UI', system-ui, sans-serif;
+      background: radial-gradient(ellipse at center, #2a1f12 0%, #0a0a0a 80%);
+      color: #e0d8c8;
+    }
+    body {
+      display: flex; flex-direction: column; align-items: center;
+      padding: max(20px, env(safe-area-inset-top, 20px)) 16px max(20px, env(safe-area-inset-bottom, 20px));
+      min-height: 100vh; min-height: 100dvh;
+    }
+    .logo {
+      width: 96px; height: 96px; margin-top: 10vh; margin-bottom: 12px;
+      border-radius: 20px; object-fit: cover;
+      box-shadow: 0 0 24px rgba(212,168,80,0.35);
+    }
+    h1 {
+      font-size: 24px; color: #d4a850; letter-spacing: 0.5px;
+      margin-bottom: 4px; font-weight: bold;
+    }
+    .sub { color: #887755; font-size: 12px; margin-bottom: 24px; }
+    .fav-list {
+      width: 100%; max-width: 420px; display: flex; flex-direction: column; gap: 8px;
+    }
+    .fav {
+      display: flex; align-items: center; gap: 10px;
+      padding: 14px 16px; background: #1a1610; border: 1px solid #3a3020;
+      border-radius: 10px; cursor: pointer;
+      transition: background 0.15s;
+    }
+    .fav:active { background: #2a2015; }
+    .fav-name { flex: 1; color: #d4a850; font-weight: bold; font-size: 15px; }
+    .fav-url { color: #887755; font-size: 11px; margin-top: 2px; }
+    .fav-text { flex: 1; min-width: 0; }
+    .fav-del {
+      background: none; border: none; color: #665540;
+      font-size: 20px; cursor: pointer; padding: 0 6px;
+    }
+    .fav-del:active { color: #a33; }
+    .add-box {
+      width: 100%; max-width: 420px;
+      margin-top: 16px; padding: 14px;
+      background: #1a1610; border: 1px solid #3a3020; border-radius: 10px;
+    }
+    .add-box h2 { font-size: 13px; color: #d4a850; margin-bottom: 8px; font-weight: bold; }
+    input {
+      width: 100%; padding: 10px 12px; margin-bottom: 6px;
+      background: #0a0a0a; border: 1px solid #3a3020; border-radius: 6px;
+      color: #e0d8c8; font-size: 14px; font-family: inherit;
+    }
+    input::placeholder { color: #665540; }
+    .add-btn {
+      width: 100%; padding: 12px; margin-top: 6px;
+      background: #d4a850; color: #0a0a0a; border: none; border-radius: 6px;
+      font-size: 14px; font-weight: bold; cursor: pointer;
+    }
+    .add-btn:active { background: #b89040; }
+    .footer {
+      margin-top: auto; padding-top: 24px;
+      color: #444; font-size: 10px; text-align: center;
+    }
+  </style>
 </head>
 <body>
-  <p>Weiterleitung zu <a href="https://bar.shinpai.de">bar.shinpai.de</a>…</p>
+  <img src="icon.png" alt="Kneipe" class="logo" onerror="this.style.display='none'">
+  <h1>🍻 Kneipenschlägerei</h1>
+  <div class="sub">Wähle deine Kneipe</div>
+
+  <div class="fav-list" id="fav-list"></div>
+
+  <div class="add-box">
+    <h2>➕ Neue Kneipe</h2>
+    <input id="add-name" placeholder="Name (z.B. Meine Kneipe)">
+    <input id="add-url" placeholder="https://bar.deinedomain.de" inputmode="url">
+    <button class="add-btn" onclick="addFav()">Speichern + Verbinden</button>
+  </div>
+
+  <div class="footer">Ist einfach passiert. 🐉</div>
+
+<script>
+const DEFAULT_FAV = {name: 'Meine Bar (shinpai.de)', url: 'https://bar.shinpai.de', isDefault: true};
+const KEY = 'kneipe_favorites_v1';
+
+function loadFavs() {
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (raw) return JSON.parse(raw);
+  } catch(_) {}
+  return [DEFAULT_FAV];
+}
+function saveFavs(favs) { localStorage.setItem(KEY, JSON.stringify(favs)); }
+
+function renderFavs() {
+  const favs = loadFavs();
+  const el = document.getElementById('fav-list');
+  el.innerHTML = '';
+  favs.forEach((f, i) => {
+    const div = document.createElement('div');
+    div.className = 'fav';
+    div.innerHTML = `
+      <div class="fav-text">
+        <div class="fav-name">${escapeHtml(f.name)}</div>
+        <div class="fav-url">${escapeHtml(f.url)}</div>
+      </div>
+      <button class="fav-del" onclick="event.stopPropagation(); delFav(${i})" title="Löschen">✕</button>
+    `;
+    div.onclick = () => connect(f.url);
+    el.appendChild(div);
+  });
+}
+
+function escapeHtml(s) { return String(s || '').replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c])); }
+
+function addFav() {
+  const name = document.getElementById('add-name').value.trim();
+  let url = document.getElementById('add-url').value.trim();
+  if (!name || !url) { alert('Name und URL bitte'); return; }
+  if (!url.match(/^https?:\/\//)) url = 'https://' + url;
+  const favs = loadFavs();
+  favs.push({name, url});
+  saveFavs(favs);
+  connect(url);
+}
+
+function delFav(i) {
+  const favs = loadFavs();
+  favs.splice(i, 1);
+  if (favs.length === 0) favs.push(DEFAULT_FAV);
+  saveFavs(favs);
+  renderFavs();
+}
+
+function connect(url) { window.location.href = url; }
+
+renderFavs();
+</script>
 </body>
 </html>
