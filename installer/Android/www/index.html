@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <title>Kneipenschlägerei</title>
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; font-family: 'Segoe UI', system-ui, sans-serif; background: #0a0a0a; color: #e0d8c8; overflow: hidden; }
@@ -27,10 +27,10 @@ input::placeholder, textarea::placeholder { color: #665540; }
 button.primary { width: 100%; padding: 14px; background: #d4a850; color: #0a0a0a; border: none; border-radius: 8px; font-size: 15px; font-weight: bold; cursor: pointer; }
 button.primary:active { background: #b89040; }
 button.ghost { background: none; border: 1px solid #3a3020; color: #d4a850; padding: 8px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; }
-.logo-hero { width: 96px; height: 96px; border-radius: 20px; margin: 10vh auto 16px; display: block; box-shadow: 0 0 24px rgba(212,168,80,0.35); }
-h1 { font-size: 24px; color: #d4a850; text-align: center; margin-bottom: 4px; }
+.logo-hero { width: 72px; height: 72px; border-radius: 16px; margin: 16px auto 12px; display: block; box-shadow: 0 0 20px rgba(212,168,80,0.35); }
+h1 { font-size: 22px; color: #d4a850; text-align: center; margin-bottom: 4px; }
 h2 { font-size: 14px; color: #d4a850; margin-bottom: 8px; }
-.center-text { text-align: center; color: #887755; font-size: 12px; margin-bottom: 16px; }
+.center-text { text-align: center; color: #887755; font-size: 12px; margin-bottom: 12px; }
 .chat-screen { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
 .chat-messages { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 6px; background: #0a0a0a; }
 .chat-msg { padding: 8px 12px; border-radius: 10px; max-width: 85%; font-size: 14px; line-height: 1.4; }
@@ -183,15 +183,18 @@ function escapeHtml(s) {
 }
 
 // ============================================================
-// API HELPER
+// API HELPER (Bearer-Token-Auth)
 // ============================================================
 async function api(path, opts={}) {
   if (!state.server) throw new Error('kein server');
   const url = state.server.url + path;
+  const headers = {'Content-Type': 'application/json'};
+  // Bearer-Token wenn eingeloggt
+  const token = state.user && state.user.token;
+  if (token) headers['Authorization'] = 'Bearer ' + token;
   const fetchOpts = {
     method: opts.method || 'GET',
-    headers: {'Content-Type': 'application/json'},
-    credentials: 'include',
+    headers,
   };
   if (opts.body) fetchOpts.body = JSON.stringify(opts.body);
   const res = await fetch(url, fetchOpts);
@@ -277,7 +280,7 @@ async function doLogin() {
   try {
     const r = await api('/api/login', {method: 'POST', body: {name: u, password: p}});
     if (r.data && r.data.ok) {
-      state.user = {name: u, is_guest: false};
+      state.user = {name: u, is_guest: false, token: r.data.token};
       msg.textContent = '';
       loadRooms();
     } else {
@@ -302,7 +305,7 @@ async function doNexusLogin() {
   try {
     const r = await api('/api/nexus/login', {method: 'POST', body: {nexus_url: nexus, username: u, password: p}});
     if (r.data && r.data.ok) {
-      state.user = {name: u, is_guest: false, via_nexus: true};
+      state.user = {name: u, is_guest: false, via_nexus: true, token: r.data.token};
       msg.textContent = '';
       loadRooms();
     } else if (r.data && r.data.need_2fa) {
@@ -310,7 +313,7 @@ async function doNexusLogin() {
       if (!totp) return;
       const r2 = await api('/api/nexus/login', {method: 'POST', body: {nexus_url: nexus, username: u, password: p, totp_code: totp}});
       if (r2.data && r2.data.ok) {
-        state.user = {name: u, is_guest: false, via_nexus: true};
+        state.user = {name: u, is_guest: false, via_nexus: true, token: r2.data.token};
         msg.textContent = '';
         loadRooms();
       } else {
