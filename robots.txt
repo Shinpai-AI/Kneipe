@@ -48,6 +48,7 @@ Sitemap: https://bar.shinpai.de/sitemap.xml
 
 # --- PROFIL & ACCOUNT ---
 # GET  /api/profile?name=XX           — Profil abrufen
+# POST /api/profile                   — Eigenes Profil updaten {tts_voice, profile_pic, age}
 # GET  /api/my-api-key                — Eigenen API-Key abrufen
 # GET  /api/teilnehmer                — Teilnehmerliste
 # POST /api/login                     — Login {name, password}

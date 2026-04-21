@@ -131,10 +131,3 @@ jobs:
 
             ### Windows
             Download `Kneipe-Setup.exe` and run it. Includes embedded Python — no system Python needed. Configures firewall, creates desktop shortcut and system tray icon.
-
-            ### Android
-            Install [Termux](https://github.com/termux/termux-app/releases) from GitHub, then run:
-            ```
-            curl -sL https://raw.githubusercontent.com/Shinpai-AI/Kneipe/main/installer/android/install-termux.sh | bash
-            ```
-            Requires Android device with 4+ GB RAM (2020+).

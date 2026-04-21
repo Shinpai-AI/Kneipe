@@ -1,22 +1,15 @@
 #!/bin/bash
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PORT=4567
-SERVICE="kneipe"
-VENV_DIR="$SCRIPT_DIR/venv"
-PYTHON="$VENV_DIR/bin/python3"
-PIP="$VENV_DIR/bin/pip"
+# Kneipen-Schlägerei — Server
+# Shinpai Games | Ist einfach passiert. 🐉
+# 1:1 nach ShinNexus-Pattern: autarkes venv, setsid-Start, PID-File.
+# systemd-Unit (Type=forking) ruft dieses Skript auf — NICHT umgekehrt.
 
-# ── VENV: Lokale Python-Umgebung (autark, keine systemweiten Deps!) ──
-ensure_venv() {
-  if [ ! -f "$PYTHON" ]; then
-    echo "  🐍 Erstelle lokale Python-Umgebung..."
-    python3 -m venv "$VENV_DIR"
-    echo "  📦 Installiere Abhängigkeiten..."
-    "$PIP" install --upgrade pip -q
-    "$PIP" install -r "$SCRIPT_DIR/requirements.txt" -q
-    echo "  ✅ Umgebung bereit!"
-  fi
-}
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_PATH="$SCRIPT_DIR/$(basename "$0")"
+PID_FILE="$SCRIPT_DIR/.kneipe.pid"
+PORT=4567
+PYTHON="$SCRIPT_DIR/venv/bin/python3"
+MAIN="server.py"
 
 show_intro() {
   echo ""
@@ -33,145 +26,139 @@ show_intro() {
   echo ""
 }
 
-# Prüfe ob systemd-Service existiert und aktiv ist
-has_service() {
-  systemctl is-enabled "$SERVICE" &>/dev/null
+# Idempotenter venv-Setup: neu anlegen wenn fehlt, requirements bei Hash-Änderung syncen.
+setup_env() {
+  local fresh=0
+  if [ ! -d "$SCRIPT_DIR/venv" ]; then
+    echo "  📦 Erstelle venv..."
+    if ! python3 -m venv "$SCRIPT_DIR/venv" 2>&1; then
+      echo "  ❌ 'python3 -m venv' fehlgeschlagen — evtl. fehlt das Paket 'python3-venv'."
+      exit 1
+    fi
+    "$PYTHON" -m pip install --upgrade pip -q
+    fresh=1
+  fi
+  if [ ! -x "$PYTHON" ]; then
+    echo "  ❌ venv defekt — $PYTHON fehlt. Fix: rm -rf '$SCRIPT_DIR/venv' && '$SCRIPT_PATH' start"
+    exit 1
+  fi
+  if [ -f "$SCRIPT_DIR/requirements.txt" ]; then
+    REQ_HASH_FILE="$SCRIPT_DIR/venv/.requirements.sha1"
+    NEW_HASH=$(sha1sum "$SCRIPT_DIR/requirements.txt" | awk '{print $1}')
+    OLD_HASH=$(cat "$REQ_HASH_FILE" 2>/dev/null || echo "")
+    if [ "$fresh" = "1" ] || [ "$NEW_HASH" != "$OLD_HASH" ]; then
+      echo "  📦 Synce requirements.txt..."
+      if ! "$PYTHON" -m pip install -r "$SCRIPT_DIR/requirements.txt" -q; then
+        echo "  ❌ pip install fehlgeschlagen."
+        exit 1
+      fi
+      echo "$NEW_HASH" > "$REQ_HASH_FILE"
+    fi
+  fi
+  [ "$fresh" = "1" ] && echo "  ✅ venv erstellt"
+}
+
+wait_port_free() {
+  for i in $(seq 1 10); do
+    PIDS=$(lsof -t -i :$PORT 2>/dev/null || ss -tlnp 2>/dev/null | grep ":$PORT " | grep -oP 'pid=\K[0-9]+')
+    [ -z "$PIDS" ] && return 0
+    [ "$i" -eq 5 ] && kill -9 $PIDS 2>/dev/null
+    sleep 1
+  done
+}
+
+kill_pgid() {
+  local pid="$1"
+  local sig="${2:-TERM}"
+  [ -z "$pid" ] && return 1
+  kill -0 "$pid" 2>/dev/null || return 0
+  local pgid
+  pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+  if [ -n "$pgid" ] && [ "$pgid" != "0" ]; then
+    kill "-$sig" -- "-$pgid" 2>/dev/null
+  else
+    kill "-$sig" "$pid" 2>/dev/null
+  fi
+}
+
+graceful_stop_pid() {
+  local pid="$1"
+  [ -z "$pid" ] && return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+  kill_pgid "$pid" TERM
+  for i in 1 2 3 4 5 6; do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.5
+  done
+  kill_pgid "$pid" KILL
+}
+
+run_converter() {
+  [ -f "$SCRIPT_DIR/converter.py" ] && "$PYTHON" "$SCRIPT_DIR/converter.py" 2>/dev/null
 }
 
 case "${1:-start}" in
   start)
-    if has_service; then
-      if systemctl is-active "$SERVICE" &>/dev/null; then
-        echo "🍺 Kneipen-Schlägerei läuft bereits (systemd)"
-        systemctl status "$SERVICE" --no-pager -l 2>/dev/null | head -5
-        exit 0
-      fi
-      show_intro
-      ensure_venv
-      echo "  📖 Themen konvertieren..."
-      cd "$SCRIPT_DIR" && "$PYTHON" converter.py 2>/dev/null
+    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+      echo "🍺 Kneipen-Schlägerei läuft bereits (PID $(cat "$PID_FILE"))"
+      exit 0
+    fi
+    FOREIGN_PIDS=$(lsof -t -i :$PORT 2>/dev/null)
+    if [ -n "$FOREIGN_PIDS" ]; then
+      echo "  ⚠️  Port $PORT belegt von fremdem Prozess (PID $FOREIGN_PIDS) — räume auf..."
+      wait_port_free
+    fi
+    setup_env
+    show_intro
+    mkdir -p "$SCRIPT_DIR/logs"
+    cd "$SCRIPT_DIR"
+    run_converter
+    echo "  🍺 Starte Server..."
+    setsid "$PYTHON" "$MAIN" > /dev/null 2>&1 &
+    echo $! > "$PID_FILE"
+    for i in $(seq 1 8); do
+      sleep 1
+      lsof -i :$PORT &>/dev/null && break
+    done
+    if kill -0 "$(cat "$PID_FILE")" 2>/dev/null && lsof -i :$PORT &>/dev/null; then
       echo ""
-      echo "  🍺 Starte Server (systemd)..."
-      sudo systemctl start "$SERVICE"
-      sleep 2
-      if systemctl is-active "$SERVICE" &>/dev/null; then
-        PID=$(systemctl show "$SERVICE" -p MainPID --value)
-        echo "  ✅ Server läuft (PID $PID)"
-        echo "  🌐 http://127.0.0.1:$PORT"
-        echo "  📋 Logs: journalctl -u $SERVICE -f"
-        echo "  📋 App-Log: $SCRIPT_DIR/logs/server.log"
-      else
-        echo "  ❌ Start fehlgeschlagen!"
-        systemctl status "$SERVICE" --no-pager -l 2>/dev/null | tail -10
-      fi
+      echo "  ╔══════════════════════════════════════╗"
+      echo "  ║  ✅ Kneipen-Schlägerei etabliert     ║"
+      echo "  ║  🌐 http://127.0.0.1:$PORT           ║"
+      echo "  ║  📋 Logs: logs/server.log            ║"
+      echo "  ║  Terminal kann geschlossen werden.   ║"
+      echo "  ╚══════════════════════════════════════╝"
       echo ""
     else
-      # Fallback: kein systemd-Service → nohup wie bisher
-      ensure_venv
-      echo "  ⚠️ Kein systemd-Service gefunden, starte manuell..."
-      PIDS=$(lsof -t -i :$PORT 2>/dev/null)
-      if [ -n "$PIDS" ]; then
-        echo "  ⚠️ Port $PORT belegt (PID: $PIDS) — wird beendet..."
-        kill $PIDS 2>/dev/null; sleep 3
-        PIDS=$(lsof -t -i :$PORT 2>/dev/null)
-        [ -n "$PIDS" ] && kill -9 $PIDS 2>/dev/null && sleep 1
-        echo "  ✅ Port $PORT frei!"
-      fi
-      show_intro
-      echo "  📖 Themen konvertieren..."
-      cd "$SCRIPT_DIR" && "$PYTHON" converter.py 2>/dev/null
-      echo ""
-      # Port 4567 belegt? Erst aufräumen.
-      OLD_PIDS=$(lsof -t -i :$PORT 2>/dev/null)
-      if [ -n "$OLD_PIDS" ]; then
-        echo "  ⚠️ Port $PORT noch belegt (PID: $OLD_PIDS) — wird beendet..."
-        kill $OLD_PIDS 2>/dev/null
-        sleep 1
-        STILL=$(lsof -t -i :$PORT 2>/dev/null)
-        [ -n "$STILL" ] && kill -9 $STILL 2>/dev/null && sleep 1
-        echo "  ✅ Port $PORT frei!"
-      fi
-      echo "  🍺 Starte Server (daemonisiert)..."
-      mkdir -p "$SCRIPT_DIR/logs"
-      # setsid -f = forkt SOFORT in neue Session → Script kehrt sauber zurück
-      setsid -f "$PYTHON" "$SCRIPT_DIR/server.py" </dev/null >>"$SCRIPT_DIR/logs/stdout.log" 2>&1
-      # Retry-Loop: bis 8 Sekunden warten bis Port gebunden ist
-      SERVER_PID=""
-      for i in 1 2 3 4 5 6 7 8; do
-        sleep 1
-        SERVER_PID=$(lsof -t -i :$PORT 2>/dev/null | head -1)
-        [ -n "$SERVER_PID" ] && break
-      done
-      if [ -n "$SERVER_PID" ]; then
-        echo "$SERVER_PID" > "$SCRIPT_DIR/.server.pid"
-        echo "  ✅ Server läuft (PID $SERVER_PID)"
-        echo "  🌐 http://127.0.0.1:$PORT"
-        echo "  📋 App-Log:  $SCRIPT_DIR/logs/server.log"
-        echo "  📋 Stdout:   $SCRIPT_DIR/logs/stdout.log"
-        echo ""
-        echo "  🍺 Fertig — Terminal kann geschlossen werden."
-      else
-        echo "  ❌ Start fehlgeschlagen! Letzte 20 Zeilen aus stdout.log:"
-        tail -20 "$SCRIPT_DIR/logs/stdout.log" 2>/dev/null
-      fi
-      echo ""
+      echo "  ❌ Start fehlgeschlagen! Check logs/server.log"
+      rm -f "$PID_FILE"
+      exit 1
     fi
+    exit 0
     ;;
   stop)
-    if has_service; then
-      sudo systemctl stop "$SERVICE"
-      echo "🛑 Kneipen-Schlägerei gestoppt (systemd)"
-    else
-      PID_FILE="$SCRIPT_DIR/.server.pid"
-      [ -f "$PID_FILE" ] && kill "$(cat "$PID_FILE")" 2>/dev/null && rm -f "$PID_FILE"
-      PIDS=$(lsof -t -i :$PORT 2>/dev/null)
-      [ -n "$PIDS" ] && kill $PIDS 2>/dev/null
-      echo "🛑 Kneipen-Schlägerei gestoppt"
+    if [ -f "$PID_FILE" ]; then
+      graceful_stop_pid "$(cat "$PID_FILE")"
+      rm -f "$PID_FILE"
     fi
+    PIDS=$(lsof -t -i :$PORT 2>/dev/null)
+    for p in $PIDS; do graceful_stop_pid "$p"; done
+    wait_port_free
+    echo "🛑 Kneipen-Schlägerei gestoppt"
     ;;
   restart)
-    if has_service; then
-      echo "🔄 Kneipen-Schlägerei neustarten (systemd)..."
-      cd "$SCRIPT_DIR" && "$PYTHON" converter.py 2>/dev/null
-      sudo systemctl restart "$SERVICE"
-      sleep 2
-      if systemctl is-active "$SERVICE" &>/dev/null; then
-        PID=$(systemctl show "$SERVICE" -p MainPID --value)
-        echo "✅ Neugestartet (PID $PID)"
-      else
-        echo "❌ Restart fehlgeschlagen!"
-        systemctl status "$SERVICE" --no-pager -l 2>/dev/null | tail -10
-      fi
-    else
-      bash "$SCRIPT_DIR/start.sh" stop
-      # Warten bis Port WIRKLICH frei ist (max 10s)
-      for i in $(seq 1 10); do
-        PIDS=$(lsof -t -i :$PORT 2>/dev/null)
-        [ -z "$PIDS" ] && break
-        [ "$i" -eq 5 ] && kill -9 $PIDS 2>/dev/null
-        sleep 1
-      done
-      bash "$SCRIPT_DIR/start.sh" start
-    fi
+    "$SCRIPT_PATH" stop
+    wait_port_free
+    "$SCRIPT_PATH" start
     ;;
   status)
-    if has_service; then
-      systemctl status "$SERVICE" --no-pager -l 2>/dev/null | head -10
+    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+      echo "🍺 Läuft (PID $(cat "$PID_FILE"))"
     else
-      PID_FILE="$SCRIPT_DIR/.server.pid"
-      if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-        echo "🍺 Läuft (PID $(cat "$PID_FILE"))"
-      else
-        echo "💤 Nicht aktiv"
-        rm -f "$PID_FILE" 2>/dev/null
-      fi
+      echo "💤 Nicht aktiv"
+      rm -f "$PID_FILE" 2>/dev/null
     fi
     ;;
-  logs)
-    tail -f "$SCRIPT_DIR/logs/server.log"
-    ;;
-  *)
-    echo "Usage: $0 {start|stop|restart|status|logs}"
-    exit 1
-    ;;
+  logs) tail -f "$SCRIPT_DIR/logs/server.log" ;;
+  *) echo "Usage: $0 {start|stop|restart|status|logs}"; exit 1 ;;
 esac

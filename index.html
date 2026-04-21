@@ -1036,6 +1036,26 @@ body { background: #0a0a0a; color: #e0d8c8; font-family: 'Georgia', serif; min-h
       <button class="prof-tab" data-tab="gaeste" id="prof-tab-gaeste" style="font-size:11px;padding:8px 14px;background:none;border:1px solid transparent;border-bottom:1px solid #3a3020;border-radius:6px 6px 0 0;margin-bottom:-1px;color:#887755;cursor:pointer;display:none;position:relative;z-index:1;">👀 Gäste</button>
       <button class="prof-tab" data-tab="sicherheit" id="prof-tab-sicherheit" style="font-size:11px;padding:8px 14px;background:none;border:1px solid transparent;border-bottom:1px solid #3a3020;border-radius:6px 6px 0 0;margin-bottom:-1px;color:#887755;cursor:pointer;position:relative;z-index:1;">🔐 Sicherheit</button>
     </div>
+    <!-- Salzstreuer (Sicherheits-Tab, Owner + 2FA) -->
+    <div id="prof-salt-section" style="margin-top:15px;display:none;background:#000;color:#fff;padding:15px;border:1px solid #3a3020;border-radius:8px;">
+      <div style="font-size:14px;color:#d4a850;margin-bottom:4px;">🧂 Salzstreuer</div>
+      <div style="font-size:11px;color:#aa9966;margin-bottom:12px;">Würfelt das Salz für den Vault-Schlüssel neu. DEK und alle Vault-Daten bleiben unberührt. Einmal pro 24 Stunden.</div>
+
+      <div id="salt-info-line" style="font-size:11px;color:#cccccc;margin-bottom:10px;">Lade…</div>
+
+      <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:10px;">
+        <input type="password" id="salt-password" placeholder="Aktuelles Passwort" style="background:#0a0a0a;color:#fff;border:1px solid #3a3020;padding:8px;border-radius:4px;font-size:12px;">
+        <input type="text" id="salt-totp" placeholder="2FA-Code (6-stellig)" maxlength="6" inputmode="numeric" pattern="[0-9]*" style="background:#0a0a0a;color:#fff;border:1px solid #3a3020;padding:8px;border-radius:4px;font-size:12px;letter-spacing:4px;text-align:center;">
+      </div>
+
+      <button class="menu-btn" id="btn-salt-rotate" style="font-size:12px;padding:8px 16px;width:100%;">🎲 Neu würfeln</button>
+      <div id="salt-rotate-msg" style="font-size:11px;margin-top:8px;min-height:14px;"></div>
+
+      <div style="font-size:10px;color:#665540;margin-top:10px;font-style:italic;line-height:1.4;">
+        Hinweis: Die <code>.salt</code>-Datei liegt in <code>vault/</code> und gehört ins Backup. Ohne sie lässt sich der Vault nicht mehr entsperren — auch nicht mit richtigem Passwort.
+      </div>
+    </div>
+
     <!-- Email-Verifikation (Sicherheits-Tab) -->
     <div style="margin-top:15px;display:none;" id="prof-email-section">
       <div id="prof-email-unverified" style="display:none;">
@@ -2497,7 +2517,7 @@ async function joinTisch(tischId, tischName) {
   chatLastTime = 0;
   chatMsgCount = 0;
   _joinedAt = Date.now() / 1000;  // Nur Voices NACH jetzt abspielen!
-  _voiceQueue.reset();
+  _sessionVoiceQueue.reset();
   document.getElementById('chat-prost-btn').style.display = 'none';
   document.getElementById('chat-title').textContent = `${currentRaumName} · ${tischName}`;
   document.getElementById('chat-info').textContent = `Tisch ${tischId.split('_t')[1] || ''}`;
@@ -2633,8 +2653,78 @@ let _chatMuted = false;
 let _autoPlayPlayed = new Set();
 let _lastTtsTexts = [];  // V4.2 Echo-Gate: letzte TTS-Texte (max 5)
 
+// --- VOICE QUEUE (V5.5 — Global-Tracker + Session-Filter) ---
+// Zwei-Ebenen-Architektur:
+//   _globalVoiceQueue: System-internal Ring-Buffer, tracked alle eingehenden Tracks
+//                      → Overload-Erkennung (>20 in 30sec → Kneipen-Pause)
+//                      → spielt NIE ab, nur System-Monitoring
+//   _sessionVoiceQueue: pro Browser eine gefilterte Kopie (ohne eigene User-Messages)
+//                       → stumpf FIFO, spielt ab wie vorher
+//   registerIncomingTrack(msg): zentrale Eintrittspforte — filtert Eigen-User zentral,
+//                               verteilt auf beide Queues
+const _globalVoiceQueue = {
+  items: [],                // [{user, user_id, url, time}] Ring im Zeitfenster
+  windowSeconds: 30,        // Rolling Window für Overload-Erkennung
+  overloadThreshold: 20,    // Ab so vielen Items im Fenster → Overload
+  overloadActive: false,
+  _onOverload: null,        // Callback: (isActive:bool) => void
+
+  push(msg) {
+    const now = Date.now() / 1000;
+    this.items.push({ user: msg.user || '', user_id: msg.user_id || '', url: msg.url || msg.tts_url || '', time: now });
+    // Alte Items rausschmeißen
+    const cutoff = now - this.windowSeconds;
+    this.items = this.items.filter(i => i.time >= cutoff);
+    // Overload-Hysterese: Activate bei >Threshold, Deactivate bei <Threshold/2
+    if (!this.overloadActive && this.items.length > this.overloadThreshold) {
+      this.overloadActive = true;
+      console.warn(`🍺 Voice-Overload: ${this.items.length} Tracks in ${this.windowSeconds}s`);
+      if (this._onOverload) try { this._onOverload(true); } catch(_) {}
+    } else if (this.overloadActive && this.items.length < Math.floor(this.overloadThreshold / 2)) {
+      this.overloadActive = false;
+      if (this._onOverload) try { this._onOverload(false); } catch(_) {}
+    }
+  },
+
+  reset() {
+    this.items = [];
+    this.overloadActive = false;
+  }
+};
+
+// Zentrale Eintrittspforte für alle eingehenden Voice-Tracks.
+// Nimmt ein Chat-Message-Objekt entgegen (braucht mind. user und tts_url),
+// trackt global, filtert eigene User raus, füttert die Session-Queue.
+function registerIncomingTrack(msg) {
+  if (!msg) return;
+  const url = (msg.file_url && msg.filetype && msg.filetype.startsWith('audio/')) ? msg.file_url : msg.tts_url;
+  if (!url) return;
+
+  // System-Tracking: IMMER in die Global-Queue (auch eigene, für Overload-Zählung)
+  _globalVoiceQueue.push({ user: msg.user, user_id: msg.user_id, url: url });
+
+  // Eigen-Filter: Session-User hört seine eigene Stimme nicht
+  // Primär user_id vergleichen (robust bei Multi-Session), Fallback auf name
+  const isOwn = currentUser && (
+    (msg.user_id && currentUser.user_id && msg.user_id === currentUser.user_id) ||
+    (msg.user && currentUser.name && msg.user === currentUser.name)
+  );
+  if (isOwn) return;
+
+  // Mute-Liste respektieren
+  if (typeof _mutedUsers !== 'undefined' && _mutedUsers && _mutedUsers.has && _mutedUsers.has(msg.user)) return;
+
+  // Chat-Mute Flag (globales Stummschalten)
+  if (_chatMuted) return;
+
+  // Bei aktivem Overload: neue Tracks vorübergehend verwerfen (die Pause macht das Overload-Banner sichtbar)
+  if (_globalVoiceQueue.overloadActive) return;
+
+  _sessionVoiceQueue.add(url);
+}
+
 // --- VOICE QUEUE (V4.0 Redesign — Playlist-Architektur!) ---
-const _voiceQueue = {
+const _sessionVoiceQueue = {
   items: [],
   maxSize: 20,
   silenceTimeout: 30000,
@@ -2771,6 +2861,29 @@ const _voiceQueue = {
 };
 let _joinedAt = 0;
 
+// Overload-Banner: zeigt "Kneipen-Pause" wenn zu viele Tracks im Zeitfenster kommen.
+// Wird von _globalVoiceQueue getriggert. Während overloadActive blockiert registerIncomingTrack neue Tracks.
+(function _voiceOverloadBanner() {
+  let banner = null;
+  function ensureBanner() {
+    if (banner) return banner;
+    banner = document.createElement('div');
+    banner.id = 'voice-overload-banner';
+    banner.style.cssText = 'position:fixed;top:70px;left:50%;transform:translateX(-50%);'
+      + 'background:linear-gradient(90deg,#d4a850,#e8c464);color:#1a1208;'
+      + 'padding:10px 20px;border-radius:8px;font-size:13px;font-weight:bold;'
+      + 'box-shadow:0 4px 12px rgba(0,0,0,0.4);z-index:9999;display:none;'
+      + 'pointer-events:none;white-space:nowrap;';
+    document.body.appendChild(banner);
+    return banner;
+  }
+  _globalVoiceQueue._onOverload = function(isActive) {
+    const b = ensureBanner();
+    b.textContent = '🍺 Zu hektisch — Kneipen-Pause, beruhigt euch!';
+    b.style.display = isActive ? 'block' : 'none';
+  };
+})();
+
 // --- VAD State (läuft EINMAL, dauerhaft) ---
 let _vadRunning = false;
 let _vadAnalyser = null;
@@ -2864,13 +2977,13 @@ function _vadLoop() {
   const avg = _vadFreqData.reduce((a,b) => a+b, 0) / _vadFreqData.length;
 
   // Queue aktiv? Nur neue Recordings blockieren, laufende laufen lassen (Boxen-Feedback-Schutz)
-  const queueActive = _voiceQueue.playing || _voiceQueue.paused || _voiceQueue.items.length > 0;
+  const queueActive = _sessionVoiceQueue.playing || _sessionVoiceQueue.paused || _sessionVoiceQueue.items.length > 0;
 
   if (avg > 8) {
     _vadSilenceSince = 0;
     if (!_vadIsLoud && !queueActive) {
       _vadIsLoud = true;
-      _voiceQueue.pause(); // Queue pausieren wenn User spricht
+      _sessionVoiceQueue.pause(); // Queue pausieren wenn User spricht
       _voiceChunks = [];
       _voiceRecorder = new MediaRecorder(_voiceStream, {mimeType: _vadMimeType});
       _voiceRecorder.ondataavailable = e => { if (e.data.size > 0) _voiceChunks.push(e.data); };
@@ -2881,7 +2994,7 @@ function _vadLoop() {
     if (Date.now() - _vadSilenceSince > 800) {
       _vadIsLoud = false;
       if (_voiceRecorder && _voiceRecorder.state === 'recording') _voiceRecorder.stop();
-      _voiceQueue.resume(); // Queue weiterspielen wenn User fertig
+      _sessionVoiceQueue.resume(); // Queue weiterspielen wenn User fertig
     }
   }
 }
@@ -2913,7 +3026,7 @@ function _startRecognition() {
     if (!last.isFinal) return;
 
     // Boxen + Voice spielt (nicht pausiert) = ignorieren. Wenn paused ODER chunks bereits da, echte Aufnahme durchlassen.
-    if (_ttsPlaying && !_voiceQueue.paused && _voiceChunks.length === 0 && _audioMode === 'speaker') return;
+    if (_ttsPlaying && !_sessionVoiceQueue.paused && _voiceChunks.length === 0 && _audioMode === 'speaker') return;
 
     const text = last[0].transcript.trim();
     if (!text) return;
@@ -2947,7 +3060,7 @@ function _startRecognition() {
       try { _voiceRecorder.stop(); } catch(_){}
     }
     _vadIsLoud = false;  // VAD erkennt "laut" → neuer Recorder mit neuem Header!
-    _voiceQueue.resume();  // Queue darf jetzt weiterlaufen, race mit VAD abgefangen
+    _sessionVoiceQueue.resume();  // Queue darf jetzt weiterlaufen, race mit VAD abgefangen
 
     // Senden!
     _sendVoiceMessage(text, chunks);
@@ -3179,35 +3292,33 @@ async function pollChat() {
   // Auto-Play fremde Voices — NUR neue (nach Join)! In Queue! EINE Quelle!
   // Mobile Fix: Wenn Queue leer und Audio idle → src cleanen für sauberen Neustart!
   // Cleanup: Wenn Queue leer und nix spielt, altes Audio-Element freigeben
-  if (_voiceQueue._currentAudio && !_voiceQueue.playing && _voiceQueue.items.length === 0) {
-    try { _voiceQueue._currentAudio.src = ''; } catch(_) {}
-    _voiceQueue._currentAudio = null;
+  if (_sessionVoiceQueue._currentAudio && !_sessionVoiceQueue.playing && _sessionVoiceQueue.items.length === 0) {
+    try { _sessionVoiceQueue._currentAudio.src = ''; } catch(_) {}
+    _sessionVoiceQueue._currentAudio = null;
   }
-  if (!_chatMuted) {
-    msgs.forEach(m => {
-      if (m.time < _joinedAt) return;
-      if (currentUser && m.user === currentUser.name) return;
-      if (_mutedUsers.has(m.user)) return;
-      const msgKey = m.user + '_' + m.time;  // V4.4: Stabile ID pro Message
-      if (_autoPlayPlayed.has(msgKey)) return;
-      const url = (m.file_url && m.filetype && m.filetype.startsWith('audio/')) ? m.file_url : m.tts_url;
-      if (!url) return;  // TTS noch nicht ready → nächster Poll versucht es nochmal
-      _autoPlayPlayed.add(msgKey);
-      _voiceQueue.add(url);
-      // V4.3.1 Echo-Gate: TTS-Text merken
-      if (m.text) { _lastTtsTexts.push(m.text); if (_lastTtsTexts.length > 5) _lastTtsTexts.shift(); }
-    });
-  }
+  // Filter (Eigen-Stimme, Mute, ChatMute, Overload) macht registerIncomingTrack zentral.
+  // Hier nur noch Tisch-spezifische Guards: Zeit seit Join + Dedup pro Message.
+  msgs.forEach(m => {
+    if (m.time < _joinedAt) return;
+    const msgKey = m.user + '_' + m.time;  // V4.4: Stabile ID pro Message
+    if (_autoPlayPlayed.has(msgKey)) return;
+    const url = (m.file_url && m.filetype && m.filetype.startsWith('audio/')) ? m.file_url : m.tts_url;
+    if (!url) return;  // TTS noch nicht ready → nächster Poll versucht es nochmal
+    _autoPlayPlayed.add(msgKey);
+    registerIncomingTrack(m);
+    // V4.3.1 Echo-Gate: TTS-Text merken (auch für eigene, damit VAD die Echos erkennt)
+    if (m.text) { _lastTtsTexts.push(m.text); if (_lastTtsTexts.length > 5) _lastTtsTexts.shift(); }
+  });
 }
 
 // Vordergrund → Queue Reset + abarbeiten!
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && _voiceQueue.items.length > 0 && !_voiceQueue.playing && !_voiceQueue.paused) {
-    _voiceQueue._playNext();
+  if (!document.hidden && _sessionVoiceQueue.items.length > 0 && !_sessionVoiceQueue.playing && !_sessionVoiceQueue.paused) {
+    _sessionVoiceQueue._playNext();
   }
 });
 
-// processAutoPlayQueue ersetzt durch _voiceQueue (V3.1)
+// processAutoPlayQueue ersetzt durch _sessionVoiceQueue (V3.1)
 
 // --- BIERDECKEL WAND ---
 document.getElementById('bd-text').oninput = () => {
@@ -3947,7 +4058,7 @@ const PROF_TAB_MAP = {
   durchsage:  ['prof-durchsage-section'],
   voice:      ['prof-voice-section'],
   gaeste:     ['prof-guest-section'],
-  sicherheit: ['prof-email-section', 'prof-2fa-section', 'prof-smtp-section', 'prof-api-section']
+  sicherheit: ['prof-salt-section', 'prof-email-section', 'prof-2fa-section', 'prof-smtp-section', 'prof-api-section']
 };
 const ALL_PROF_SECTIONS = Object.values(PROF_TAB_MAP).flat();
 
@@ -3962,6 +4073,7 @@ function switchProfTab(tab) {
   }
   if (tab === 'sicherheit') {
     try { loadEmailStatus(); } catch(e) {}
+    try { loadSaltInfo(); } catch(e) {}
   }
   // Vision 1: Durchsage-Tab aktivieren
   if (tab === 'durchsage' && currentUser && currentUser.is_owner) {
@@ -3979,6 +4091,7 @@ function switchProfTab(tab) {
     if (el) {
       // SMTP nur für Owner sichtbar (Security)
       if (id === 'prof-smtp-section' && (!currentUser || !currentUser.is_owner)) { el.style.display = 'none'; return; }
+      if (id === 'prof-salt-section' && (!currentUser || !currentUser.is_owner)) { el.style.display = 'none'; return; }
       el.style.display = '';
       el.style.border = '1px solid #3a3020';
       el.style.borderTop = i === 0 ? '1px solid #3a3020' : '';
@@ -5176,11 +5289,11 @@ async function durchsagePoll() {
       // Auto-scroll + Limit
       stream.scrollTop = stream.scrollHeight;
       while (stream.children.length > 200) stream.removeChild(stream.firstChild);
-      // Sound: spiele TTS für Channels mit sound=true. Self-Filter!
+      // Sound: spiele TTS für Channels mit sound=true. Self-Filter macht registerIncomingTrack.
       for (const ev of events) {
         const sub = durchsageLocalState[ev.channel_id];
-        if (sub && sub.sound && ev.msg.tts_url && currentUser && ev.msg.user !== currentUser.name) {
-          try { _voiceQueue.add(ev.msg.tts_url); } catch(e) { try { new Audio(ev.msg.tts_url).play().catch(()=>{}); } catch(_) {} }
+        if (sub && sub.sound && ev.msg.tts_url) {
+          try { registerIncomingTrack(ev.msg); } catch(e) { try { new Audio(ev.msg.tts_url).play().catch(()=>{}); } catch(_) {} }
         }
       }
     }
@@ -5401,14 +5514,14 @@ async function tresenPoll() {
         const prefix = isOwner ? '📢 OWNER' : (ev.msg.user || 'system');
         const tag = `<span style="background:#3a3020;color:#d4a850;font-size:9px;padding:1px 4px;border-radius:3px;margin-right:4px;">${ev.kind === 'tresen' ? '🍻' : '🪑'} ${ev.channel_label}</span>`;
         stream.insertAdjacentHTML('beforeend', `<div style="margin:2px 0;${ownerStyle}${sysStyle}">${tag}<b>${prefix}:</b> ${text}</div>`);
-        // Auto-Play: Tresen-Chat IMMER (wenn nicht muted), Tische nur bei sound=true
-        // Self-Filter: eigene Messages nicht abspielen
-        if (!tresenMuted && ev.msg.tts_url && currentUser && ev.msg.user !== currentUser.name) {
+        // Auto-Play: Tresen-Chat IMMER (wenn nicht muted), Tische nur bei sound=true.
+        // Self-Filter macht registerIncomingTrack zentral.
+        if (!tresenMuted && ev.msg.tts_url) {
           const isTresenChannel = ev.kind === 'tresen';
           const sub = tresenSubs[ev.channel_id];
           const wantAudio = isTresenChannel || (sub && sub.sound);
           if (wantAudio) {
-            try { _voiceQueue.add(ev.msg.tts_url); } catch(e) { try { new Audio(ev.msg.tts_url).play().catch(()=>{}); } catch(_) {} }
+            try { registerIncomingTrack(ev.msg); } catch(e) { try { new Audio(ev.msg.tts_url).play().catch(()=>{}); } catch(_) {} }
           }
         }
       }
@@ -5575,6 +5688,68 @@ document.getElementById('btn-resend-verify').onclick = async () => {
   if (r.error) { msg.style.color = '#f44'; msg.textContent = '❌ ' + r.error; return; }
   msg.style.color = '#4a4'; msg.textContent = '✅ Verifizierungs-Mail gesendet! Check deine Inbox.';
 };
+
+// ══════════════════════════════════════════════════════════════
+//  🧂 SALZSTREUER — Salt-Rotation (Sicherheits-Tab, Owner + 2FA)
+// ══════════════════════════════════════════════════════════════
+
+function _fmtSaltTime(unix) {
+  if (!unix) return '—';
+  const d = new Date(unix * 1000);
+  return d.toLocaleDateString('de-DE') + ' – ' + d.toLocaleTimeString('de-DE', {hour:'2-digit', minute:'2-digit'});
+}
+
+async function loadSaltInfo() {
+  const line = document.getElementById('salt-info-line');
+  const btn = document.getElementById('btn-salt-rotate');
+  if (!line || !btn) return;
+  const r = await api('/api/vault/salt-info', 'POST', {});
+  if (!r || r.error) {
+    line.innerHTML = '<span style="color:#f59e0b;">Salt-Info nicht abrufbar' + (r && r.error ? ': ' + r.error : '') + '</span>';
+    btn.disabled = true;
+    return;
+  }
+  let html = '';
+  if (!r.present) {
+    html = '<span style="color:#f59e0b;">Kein Salz hinterlegt — Vault noch nicht initialisiert.</span>';
+  } else {
+    html = `Zuletzt gestreut: <b style="color:#e0d8c8;">${_fmtSaltTime(r.last_rotated)}</b><br>Aktuelles Salz: <code style="color:#d4a850;">${r.salt_short}</code>`;
+    if (!r.can_rotate_now) {
+      const hrs = Math.floor(r.seconds_until_ready / 3600);
+      const mins = Math.floor((r.seconds_until_ready % 3600) / 60);
+      html += `<br><span style="color:#aa9966;">Nächster Wurf in ${hrs} h ${mins} min.</span>`;
+    }
+  }
+  line.innerHTML = html;
+  btn.disabled = !(r.can_rotate_now !== false);
+  btn.style.opacity = btn.disabled ? '0.5' : '1';
+}
+
+async function doSaltRotate() {
+  const pw = document.getElementById('salt-password').value;
+  const totp = document.getElementById('salt-totp').value.trim();
+  const msg = document.getElementById('salt-rotate-msg');
+  if (!pw || !totp) { msg.style.color = '#f44'; msg.textContent = '❌ Passwort und 2FA-Code nötig.'; return; }
+  msg.style.color = '#d4a850'; msg.textContent = '⏳ Würfel rollen…';
+  const r = await api('/api/vault/salt-rotate', 'POST', {password: pw, totp: totp});
+  if (r.error) {
+    msg.style.color = '#f44';
+    msg.textContent = '❌ ' + r.error;
+  } else {
+    msg.style.color = '#4a8a4a';
+    let txt = `✅ Neu gestreut: ${r.new_salt_short}`;
+    if (r.seed_backup_stale) txt += ' (Seed-Backup veraltet — beim nächsten 2FA-Refresh wird es erneuert.)';
+    msg.textContent = txt;
+    document.getElementById('salt-password').value = '';
+    document.getElementById('salt-totp').value = '';
+    loadSaltInfo();
+  }
+}
+
+document.getElementById('btn-salt-rotate').onclick = doSaltRotate;
+document.getElementById('salt-totp').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') doSaltRotate();
+});
 
 // ══════════════════════════════════════════════════════════════
 //  🔑 IGNI — Hausschlüssel (1:1 von ShinNexus)

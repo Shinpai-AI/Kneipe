@@ -49,12 +49,12 @@ log.addHandler(handler)
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes as _chashes
+from argon2.low_level import hash_secret_raw, Type as _Argon2Type
 from pathlib import Path as _Path
 
 VAULT_DIR = os.path.join(BASE, 'vault')
 CREDENTIALS_DIR = os.path.join(BASE, 'credentials')
 IDENTITY_VAULT = os.path.join(VAULT_DIR, 'identity.vault')
-SYSTEM_SALT_FILE = os.path.join(CREDENTIALS_DIR, 'system_salt')
 RECOVERY_HASH_FILE = os.path.join(CREDENTIALS_DIR, 'recovery.hash')
 RECOVERY_KEY_FILE = os.path.join(CREDENTIALS_DIR, 'recovery.enc')
 # Ignition Key — 1:1 ShinNexus-Pattern
@@ -68,10 +68,21 @@ SYSTEM_OWNER_SIG = _Path(VAULT_DIR) / "system.owner.sig"
 SIGNING_KEY_FILE = _Path(CREDENTIALS_DIR) / "signing_key.vault"
 
 # PQ-Vault-Wrap (KEK/DEK/ML-KEM — 1:1 von ShinNexus)
+SALT_FILE = _Path(VAULT_DIR) / ".salt"                                     # 16 Byte zufällig + 8 Byte Unix-Timestamp, unverschlüsselt, gehört ins Backup
 VAULT_KEM_PRIV_FILE = _Path(CREDENTIALS_DIR) / "vault_kem_priv.vault"
 VAULT_KEM_PRIV_SEED_FILE = _Path(CREDENTIALS_DIR) / "vault_kem_priv.seed.vault"
 VAULT_KEM_PUB_FILE = _Path(CREDENTIALS_DIR) / "vault_kem_pub.key"
 DEK_WRAP_FILE = _Path(VAULT_DIR) / "dek.wrap"
+
+# Argon2id-Parameter (hard-coded nach PQ-Architektur.md „KDF-Härtung"):
+# 128 MB RAM, 3 Iterationen, 4 Threads, 32 Byte Output. Keine Config, kein „schneller Modus".
+_ARGON2_MEMORY_COST = 131_072   # KiB = 128 MB
+_ARGON2_TIME_COST = 3
+_ARGON2_PARALLELISM = 4
+_ARGON2_HASH_LEN = 32
+
+# Salzstreuer: max 1x pro 24h
+_SALT_COOLDOWN_SECONDS = 24 * 3600
 
 # Users (Vault-basiert, 1:1 von ShinNexus)
 USERS_VAULT = _Path(VAULT_DIR) / "users.vault"
@@ -91,10 +102,9 @@ except OSError:
     pass
 
 _VAULT_MAGIC = b'KVAULT2'
-_vault_master_key = None   # Abgeleiteter 256-bit Key, nie Klartext-PW!
 _vault_unlock_time = 0.0
 _VAULT_MAX_AGE = 86400     # 24h Auto-Lock
-_dek: bytes | None = None  # Data Encryption Key — RAM-only (PQ-Vault-Wrap)
+_dek: bytes | None = None  # Data Encryption Key — RAM-only (PQ-Vault-Wrap, einziger Schlüssel!)
 
 
 def _get_machine_id():
@@ -117,12 +127,12 @@ def _derive_vault_key(password: str, salt: bytes) -> bytes:
 
 
 def _derive_file_key(salt: bytes) -> bytes:
-    """Per-File AES-256 Key: SHA256((dek oder master_key) + machine_id + file_salt)."""
-    base = _dek or _vault_master_key
-    if base is None:
+    """Per-File AES-256 Key: SHA256(DEK + machine_id + file_salt).
+    DEK kommt aus _pq_init_fresh / _pq_unlock_dek_via_password / _pq_unlock_dek_via_seed."""
+    if _dek is None:
         raise RuntimeError('Vault gesperrt — unlock() zuerst!')
     mid = _get_machine_id().encode()
-    return hashlib.sha256(base + mid + salt).digest()
+    return hashlib.sha256(_dek + mid + salt).digest()
 
 
 def _vault_encrypt_bytes(plaintext: bytes, password: str = None) -> bytes:
@@ -147,8 +157,7 @@ def _vault_decrypt_bytes(ciphertext: bytes, password: str = None) -> bytes:
 
 def vault_is_unlocked() -> bool:
     """Vault-Status: entsperrt und nicht abgelaufen?"""
-    global _vault_master_key, _vault_unlock_time
-    if _vault_master_key is None and _dek is None:
+    if _dek is None:
         return False
     if time.time() - _vault_unlock_time > _VAULT_MAX_AGE:
         vault_lock()
@@ -158,9 +167,8 @@ def vault_is_unlocked() -> bool:
 
 
 def vault_lock():
-    """Vault sperren — alle Keys aus RAM löschen."""
-    global _vault_master_key, _vault_unlock_time, _dek
-    _vault_master_key = None
+    """Vault sperren — DEK aus RAM löschen."""
+    global _vault_unlock_time, _dek
     _dek = None
     _vault_unlock_time = 0
     log.info('🔒 Vault gesperrt')
@@ -180,17 +188,104 @@ def _pq_get_machine_id_bytes() -> bytes:
         return platform.node().encode()
 
 
-def _pq_derive_kek(password: str, salt: bytes = b"pq-kek-v3") -> bytes:
-    """32-byte KEK aus Password + machine-id + konstanter Salt."""
+# ── .salt — 16 Byte Zufall + Unix-Timestamp (last_rotated), unverschlüsselt ──
+# Format: zwei Zeilen Text
+#   Zeile 1: 32 hex chars (16 Byte zufälliger Salt)
+#   Zeile 2: Unix-Timestamp (Sekunden) — letzter Salzstreuer-Zeitpunkt
+# Salt ist NICHT geheim. Schutz vor Rainbow-Tables per Einzigartigkeit.
+# Nicht in Igni packen — muss mit ins Vault-Backup!
+
+def _salt_read() -> tuple[bytes, int] | None:
+    """Liest .salt. Returns (salt_bytes_16, last_rotated_unix) oder None wenn Datei fehlt/defekt."""
+    if not SALT_FILE.exists():
+        return None
+    try:
+        text = SALT_FILE.read_text("utf-8").strip().splitlines()
+        salt_bytes = bytes.fromhex(text[0].strip())
+        last_rotated = int(text[1].strip()) if len(text) > 1 else 0
+        if len(salt_bytes) != 16:
+            return None
+        return (salt_bytes, last_rotated)
+    except Exception:
+        return None
+
+
+def _salt_write(salt_bytes: bytes, rotated_at: int | None = None) -> None:
+    """Schreibt .salt (16 Byte Salt + Unix-Timestamp). chmod 600 — nicht geheim, aber hygienisch."""
+    if len(salt_bytes) != 16:
+        raise ValueError("Salt muss 16 Byte sein")
+    os.makedirs(VAULT_DIR, exist_ok=True)
+    ts = rotated_at if rotated_at is not None else int(time.time())
+    SALT_FILE.write_text(f"{salt_bytes.hex()}\n{ts}\n", encoding="utf-8")
+    try:
+        os.chmod(str(SALT_FILE), 0o600)
+    except OSError:
+        pass
+
+
+def _salt_ensure() -> bytes:
+    """Liefert Salt. Erzeugt ihn einmalig wenn er noch nicht existiert."""
+    existing = _salt_read()
+    if existing is not None:
+        return existing[0]
+    new_salt = secrets.token_bytes(16)
+    _salt_write(new_salt, rotated_at=int(time.time()))
+    return new_salt
+
+
+def _salt_metadata() -> dict:
+    """Für UI/API: aktueller Salt (gekürzt hex), letzter Wurf, nächster Wurf möglich."""
+    existing = _salt_read()
+    if existing is None:
+        return {"present": False, "salt_short": "", "last_rotated": 0, "cooldown_until": 0}
+    salt_bytes, last_rotated = existing
+    salt_hex = salt_bytes.hex()
+    short = f"{salt_hex[:8]}…{salt_hex[-4:]}"
+    return {
+        "present": True,
+        "salt_short": short,
+        "last_rotated": last_rotated,
+        "cooldown_until": last_rotated + _SALT_COOLDOWN_SECONDS,
+    }
+
+
+# ── Argon2id KDFs (PFLICHT, kein SHA256-Fallback!) ────────────────
+# Parameter hard-coded (siehe PQ-Architektur.md „KDF-Härtung"):
+#   128 MB Speicher, 3 Iterationen, 4 Threads, 32 Byte Output.
+# Kein „schneller Modus", keine Config-Variante. Ende.
+
+def _pq_derive_kek(password: str, salt_bytes: bytes) -> bytes:
+    """32-Byte KEK aus Passwort + Salt + machine-id via Argon2id.
+    Salt MUSS übergeben werden (aus _salt_ensure()/_salt_read()). Keine Default!"""
+    if not salt_bytes or len(salt_bytes) != 16:
+        raise ValueError("Salt (16 Byte) ist Pflicht für KEK-Ableitung")
     mid = _pq_get_machine_id_bytes()
-    return hashlib.sha256(b"shinpai-vault-kek-v3-" + salt + password.encode("utf-8") + mid).digest()
+    return hash_secret_raw(
+        secret=b"shinpai-vault-kek-v4-" + password.encode("utf-8") + mid,
+        salt=salt_bytes,
+        time_cost=_ARGON2_TIME_COST,
+        memory_cost=_ARGON2_MEMORY_COST,
+        parallelism=_ARGON2_PARALLELISM,
+        hash_len=_ARGON2_HASH_LEN,
+        type=_Argon2Type.ID,
+    )
 
 
-def _pq_derive_seed_key(seed_phrase: str) -> bytes:
-    """32-byte Seed-Key aus Seed-Phrase + machine-id."""
+def _pq_derive_seed_key(seed_phrase: str, salt_bytes: bytes) -> bytes:
+    """32-Byte Seed-Key aus Seed-Phrase + Salt + machine-id via Argon2id."""
+    if not salt_bytes or len(salt_bytes) != 16:
+        raise ValueError("Salt (16 Byte) ist Pflicht für Seed-Key-Ableitung")
     mid = _pq_get_machine_id_bytes()
     normalized = " ".join(seed_phrase.strip().lower().split())
-    return hashlib.sha256(b"shinpai-vault-seed-v3-" + normalized.encode("utf-8") + mid).digest()
+    return hash_secret_raw(
+        secret=b"shinpai-vault-seed-v4-" + normalized.encode("utf-8") + mid,
+        salt=salt_bytes,
+        time_cost=_ARGON2_TIME_COST,
+        memory_cost=_ARGON2_MEMORY_COST,
+        parallelism=_ARGON2_PARALLELISM,
+        hash_len=_ARGON2_HASH_LEN,
+        type=_Argon2Type.ID,
+    )
 
 
 def _pq_encrypt_priv(kem_sk: bytes, key: bytes, aad: bytes) -> bytes:
@@ -238,63 +333,59 @@ def _pq_unwrap_dek(wrap_blob: bytes, kem_sk: bytes) -> bytes:
 _pq_pending_kem_sk: bytes | None = None
 
 def _pq_init_fresh(password: str, seed_phrase: str | None = None) -> bytes:
-    """Erstinitialisierung: DEK + ML-KEM-Pair generieren, alle Wrap-Files schreiben."""
+    """Erstinitialisierung: DEK + ML-KEM-Pair generieren, alle Wrap-Files schreiben.
+    Gibt DEK zurück (im RAM behalten für weitere Operationen)."""
     global _pq_pending_kem_sk
     dek = secrets.token_bytes(32)
     kem = oqs.KeyEncapsulation("ML-KEM-768")
     kem_pk = kem.generate_keypair()
     kem_sk = kem.export_secret_key()
     kem.free()
+
+    # DEK wrappen mit Public-Key
     wrap_blob = _pq_wrap_dek(dek, kem_pk)
     DEK_WRAP_FILE.write_bytes(wrap_blob)
     try: os.chmod(str(DEK_WRAP_FILE), 0o600)
     except OSError: pass
+
+    # ML-KEM-Public speichern (Klartext)
     VAULT_KEM_PUB_FILE.write_bytes(kem_pk)
     try: os.chmod(str(VAULT_KEM_PUB_FILE), 0o644)
     except OSError: pass
-    kek = _pq_derive_kek(password)
+
+    # Salt erzeugen (einmalig bei Erst-Init) + ML-KEM-Private mit Argon2id-KEK verschlüsseln
+    salt_bytes = _salt_ensure()
+    kek = _pq_derive_kek(password, salt_bytes)
     priv_blob = _pq_encrypt_priv(kem_sk, kek, b"vault-kem-priv-pw-v3")
     VAULT_KEM_PRIV_FILE.write_bytes(priv_blob)
     try: os.chmod(str(VAULT_KEM_PRIV_FILE), 0o600)
     except OSError: pass
+
+    # Seed-Backup falls Seed übergeben — gleicher Salt wie KEK
     if seed_phrase:
-        seed_key = _pq_derive_seed_key(seed_phrase)
+        seed_key = _pq_derive_seed_key(seed_phrase, salt_bytes)
         seed_blob = _pq_encrypt_priv(kem_sk, seed_key, b"vault-kem-priv-seed-v3")
         VAULT_KEM_PRIV_SEED_FILE.write_bytes(seed_blob)
         try: os.chmod(str(VAULT_KEM_PRIV_SEED_FILE), 0o600)
         except OSError: pass
         _pq_pending_kem_sk = None
     else:
+        # KEM-SK im RAM halten bis create_account den Seed generiert hat
         _pq_pending_kem_sk = kem_sk
-    log.info("🌿 PQ-Vault initialisiert (ML-KEM-768 Wrap, KEK/DEK)")
+
+    log.info("🌿 PQ-Vault initialisiert (Argon2id + ML-KEM-768 Wrap, KEK/DEK)")
     return dek
 
 
-def _pq_init_fresh_with_dek(password: str, dek: bytes):
-    """Wie _pq_init_fresh aber mit vorgegebenem DEK (für Migration)."""
-    kem = oqs.KeyEncapsulation("ML-KEM-768")
-    kem_pk = kem.generate_keypair()
-    kem_sk = kem.export_secret_key()
-    kem.free()
-    wrap_blob = _pq_wrap_dek(dek, kem_pk)
-    DEK_WRAP_FILE.write_bytes(wrap_blob)
-    try: os.chmod(str(DEK_WRAP_FILE), 0o600)
-    except OSError: pass
-    VAULT_KEM_PUB_FILE.write_bytes(kem_pk)
-    kek = _pq_derive_kek(password)
-    priv_blob = _pq_encrypt_priv(kem_sk, kek, b"vault-kem-priv-pw-v3")
-    VAULT_KEM_PRIV_FILE.write_bytes(priv_blob)
-    try: os.chmod(str(VAULT_KEM_PRIV_FILE), 0o600)
-    except OSError: pass
-
-
 def _pq_create_seed_backup(seed_phrase: str) -> bool:
-    """Nachträgliches Seed-Backup für ML-KEM-Private erstellen."""
+    """Nachträgliches Seed-Backup für ML-KEM-Private erstellen.
+    Wird nach _pq_init_fresh aufgerufen wenn Seed erst nach vault_unlock generiert wird."""
     global _pq_pending_kem_sk
     if _pq_pending_kem_sk is None:
         return False
     try:
-        seed_key = _pq_derive_seed_key(seed_phrase)
+        salt_bytes = _salt_ensure()
+        seed_key = _pq_derive_seed_key(seed_phrase, salt_bytes)
         seed_blob = _pq_encrypt_priv(_pq_pending_kem_sk, seed_key, b"vault-kem-priv-seed-v3")
         VAULT_KEM_PRIV_SEED_FILE.write_bytes(seed_blob)
         try: os.chmod(str(VAULT_KEM_PRIV_SEED_FILE), 0o600)
@@ -306,11 +397,15 @@ def _pq_create_seed_backup(seed_phrase: str) -> bool:
 
 
 def _pq_unlock_dek_via_password(password: str) -> bytes | None:
-    """PW → KEK → ML-KEM-Private entschlüsseln → DEK entwrappen."""
+    """PW → Argon2id-KEK (mit .salt) → ML-KEM-Private entschlüsseln → DEK entwrappen."""
     if not VAULT_KEM_PRIV_FILE.exists() or not DEK_WRAP_FILE.exists():
         return None
+    salt_info = _salt_read()
+    if salt_info is None:
+        log.warning("⚠️ .salt fehlt — Vault nicht entsperrbar. Mit ins Backup nehmen!")
+        return None
     try:
-        kek = _pq_derive_kek(password)
+        kek = _pq_derive_kek(password, salt_info[0])
         kem_sk = _pq_decrypt_priv(VAULT_KEM_PRIV_FILE.read_bytes(), kek, b"vault-kem-priv-pw-v3")
         return _pq_unwrap_dek(DEK_WRAP_FILE.read_bytes(), kem_sk)
     except Exception:
@@ -318,25 +413,82 @@ def _pq_unlock_dek_via_password(password: str) -> bytes | None:
 
 
 def _pq_unlock_dek_via_seed(seed_phrase: str) -> bytes | None:
-    """Seed → Seed-Key → ML-KEM-Private entschlüsseln → DEK entwrappen."""
+    """Seed → Argon2id-Seed-Key (mit .salt) → ML-KEM-Private entschlüsseln → DEK entwrappen."""
     if not VAULT_KEM_PRIV_SEED_FILE.exists() or not DEK_WRAP_FILE.exists():
         return None
+    salt_info = _salt_read()
+    if salt_info is None:
+        log.warning("⚠️ .salt fehlt — Seed-Recovery nicht möglich. Mit ins Backup nehmen!")
+        return None
     try:
-        seed_key = _pq_derive_seed_key(seed_phrase)
+        seed_key = _pq_derive_seed_key(seed_phrase, salt_info[0])
         kem_sk = _pq_decrypt_priv(VAULT_KEM_PRIV_SEED_FILE.read_bytes(), seed_key, b"vault-kem-priv-seed-v3")
         return _pq_unwrap_dek(DEK_WRAP_FILE.read_bytes(), kem_sk)
     except Exception:
         return None
 
 
+def _pq_rotate_salt(password: str) -> dict:
+    """Salzstreuer — atomische Salt-Rotation.
+    Altes Salz lesen → KEK-alt → ML-KEM-Priv im RAM → neues Salz würfeln →
+    KEK-neu → ML-KEM-Priv mit KEK-neu re-wrap → .salt überschreiben.
+    DEK und alle anderen Vault-Dateien bleiben unberührt.
+    Returns {ok, new_salt_short, last_rotated, seed_backup_stale} oder {error}."""
+    if not VAULT_KEM_PRIV_FILE.exists():
+        return {"error": "Vault nicht initialisiert"}
+    salt_info = _salt_read()
+    if salt_info is None:
+        return {"error": ".salt fehlt — Vault-Backup unvollständig"}
+    old_salt, _ = salt_info
+    try:
+        old_kek = _pq_derive_kek(password, old_salt)
+        kem_sk = _pq_decrypt_priv(VAULT_KEM_PRIV_FILE.read_bytes(), old_kek, b"vault-kem-priv-pw-v3")
+    except Exception:
+        return {"error": "Passwort falsch"}
+
+    # Neues Salz würfeln
+    new_salt = secrets.token_bytes(16)
+    new_kek = _pq_derive_kek(password, new_salt)
+    try:
+        new_priv_blob = _pq_encrypt_priv(kem_sk, new_kek, b"vault-kem-priv-pw-v3")
+        VAULT_KEM_PRIV_FILE.write_bytes(new_priv_blob)
+        try: os.chmod(str(VAULT_KEM_PRIV_FILE), 0o600)
+        except OSError: pass
+
+        # Seed-Backup mit neuem Salt re-wrappen geht hier nicht (wir kennen seed_phrase nicht).
+        # Konsequenz: kem_priv.seed.vault ist jetzt mit OLD salt verschlüsselt.
+        # UI zeigt „Seed-Backup stale" — User erneuert es bei nächstem 2FA-Refresh.
+        seed_backup_stale = VAULT_KEM_PRIV_SEED_FILE.exists()
+
+        now_ts = int(time.time())
+        _salt_write(new_salt, rotated_at=now_ts)
+        log.info(f"🧂 Salt rotiert (Salzstreuer) — neuer Salt {new_salt.hex()[:8]}…{new_salt.hex()[-4:]}")
+        return {
+            "ok": True,
+            "new_salt_short": f"{new_salt.hex()[:8]}…{new_salt.hex()[-4:]}",
+            "last_rotated": now_ts,
+            "seed_backup_stale": seed_backup_stale,
+        }
+    except Exception as e:
+        log.error(f"⚠️ Salt-Rotation fehlgeschlagen: {e}")
+        return {"error": f"Salt-Rotation fehlgeschlagen: {e}"}
+
+
 def _pq_rewrap_kem_priv(old_password: str, new_password: str) -> bool:
-    """Atomischer PW-Change: ML-KEM-Private mit neuer KEK neu verschlüsseln."""
+    """Atomischer PW-Change: ML-KEM-Private mit neuer KEK neu verschlüsseln.
+    DEK und Vault-Files bleiben unberührt — nur eine kleine Datei wird ersetzt.
+    Salt bleibt gleich (nur der Salzstreuer rotiert den Salt!). Returns True bei Erfolg."""
     if not VAULT_KEM_PRIV_FILE.exists():
         return False
+    salt_info = _salt_read()
+    if salt_info is None:
+        log.warning("⚠️ .salt fehlt — PW-Change unmöglich")
+        return False
     try:
-        old_kek = _pq_derive_kek(old_password)
+        salt_bytes = salt_info[0]
+        old_kek = _pq_derive_kek(old_password, salt_bytes)
         kem_sk = _pq_decrypt_priv(VAULT_KEM_PRIV_FILE.read_bytes(), old_kek, b"vault-kem-priv-pw-v3")
-        new_kek = _pq_derive_kek(new_password)
+        new_kek = _pq_derive_kek(new_password, salt_bytes)
         new_blob = _pq_encrypt_priv(kem_sk, new_kek, b"vault-kem-priv-pw-v3")
         VAULT_KEM_PRIV_FILE.write_bytes(new_blob)
         try: os.chmod(str(VAULT_KEM_PRIV_FILE), 0o600)
@@ -351,8 +503,11 @@ def _pq_get_kem_sk_via_password(password: str) -> bytes | None:
     """Holt ML-KEM-Private per PW (intern genutzt)."""
     if not VAULT_KEM_PRIV_FILE.exists():
         return None
+    salt_info = _salt_read()
+    if salt_info is None:
+        return None
     try:
-        kek = _pq_derive_kek(password)
+        kek = _pq_derive_kek(password, salt_info[0])
         return _pq_decrypt_priv(VAULT_KEM_PRIV_FILE.read_bytes(), kek, b"vault-kem-priv-pw-v3")
     except Exception:
         return None
@@ -361,7 +516,10 @@ def _pq_get_kem_sk_via_password(password: str) -> bytes | None:
 def _pq_write_seed_backup_with_sk(seed_phrase: str, kem_sk: bytes) -> bool:
     """Schreibt kem_priv.seed.vault wenn kem_sk bekannt."""
     try:
-        seed_key = _pq_derive_seed_key(seed_phrase)
+        salt_info = _salt_read()
+        if salt_info is None:
+            return False
+        seed_key = _pq_derive_seed_key(seed_phrase, salt_info[0])
         blob = _pq_encrypt_priv(kem_sk, seed_key, b"vault-kem-priv-seed-v3")
         VAULT_KEM_PRIV_SEED_FILE.write_bytes(blob)
         try: os.chmod(str(VAULT_KEM_PRIV_SEED_FILE), 0o600)
@@ -372,80 +530,61 @@ def _pq_write_seed_backup_with_sk(seed_phrase: str, kem_sk: bytes) -> bool:
         return False
 
 
-def _pq_migrate_from_legacy(password: str):
-    """Einmal-Migration: bestehenden v2-Vault auf PQ-Wrap umstellen."""
-    global _dek
-    if VAULT_KEM_PRIV_FILE.exists() and DEK_WRAP_FILE.exists():
-        return
-    try:
-        _dek = _vault_master_key
-        _pq_init_fresh_with_dek(password, _dek)
-        log.info("🌿 Auto-Migration v2 → PQ-Wrap abgeschlossen")
-    except Exception as e:
-        log.warning(f"⚠️ Auto-Migration fehlgeschlagen: {e}")
-        _dek = None
-
-
 def vault_unlock(password: str) -> bool:
-    """Vault entsperren. PQ-basiert (KEK → ML-KEM-Priv → DEK).
-    Legacy-Fallback für Vaults aus v2 (Migration läuft automatisch)."""
-    global _vault_master_key, _vault_unlock_time, _dek
+    """Vault entsperren — PQ-only (Argon2id → KEK → ML-KEM-Priv → DEK).
+    KEIN SHA256-Legacy-Pfad, KEIN Fallback. Wer einen alten v2-Vault hat: muss neu anlegen.
+    Siehe PQ-Architektur.md „Eiserne Regeln: KEIN Fallback"."""
+    global _vault_unlock_time, _dek
 
-    # Neuer Weg: PQ-Wrap vorhanden?
+    # Fall 1: PQ-Vault existiert → Argon2id-Entsperrung
     if VAULT_KEM_PRIV_FILE.exists() and DEK_WRAP_FILE.exists():
+        if not SALT_FILE.exists():
+            log.error("❌ Vault gefunden aber .salt fehlt — Backup unvollständig!")
+            _dek = None
+            _vault_unlock_time = 0
+            return False
         dek = _pq_unlock_dek_via_password(password)
         if dek is None:
             _dek = None
-            _vault_master_key = None
             _vault_unlock_time = 0
             log.warning("🔒 Vault-Passwort falsch!")
             return False
         _dek = dek
-        _vault_master_key = hashlib.sha256(
-            b'shinpai-kneipe-vault-v2' + password.encode('utf-8') + _pq_get_machine_id_bytes()
-        ).digest()
         _vault_unlock_time = time.time()
-        log.info("🔒 Vault entsperrt (PQ-Wrap: ML-KEM-768 + DEK)")
+        log.info("🔒 Vault entsperrt (Argon2id + ML-KEM-768 + DEK)")
         return True
 
-    # Legacy-Weg: alter v2-Master-Key (ohne PQ-Wrap)
-    mid = _pq_get_machine_id_bytes()
-    _vault_master_key = hashlib.sha256(
-        b'shinpai-kneipe-vault-v2' + password.encode('utf-8') + mid
-    ).digest()
-    _vault_unlock_time = time.time()
-    _dek = None
+    # Fall 2: Altes v2-Format erkannt → KEINE Migration, klarer Fehler
     if os.path.exists(IDENTITY_VAULT):
-        try:
-            with open(IDENTITY_VAULT, 'rb') as f:
-                _vault_decrypt_bytes(f.read())
-            log.info("🔒 Vault entsperrt (Legacy v2 — Migration zu PQ beim nächsten Start)")
-            _pq_migrate_from_legacy(password)
-            return True
-        except Exception:
-            _vault_master_key = None
-            _vault_unlock_time = 0
-            log.warning("🔒 Vault-Passwort falsch!")
-            return False
-    # Kein Vault → First-Start — PQ-Wrap direkt aufbauen
+        log.error("❌ Alter v2-Vault erkannt — Migration nicht unterstützt. "
+                  "Bitte vault/ + credentials/ leeren und neu anlegen.")
+        _dek = None
+        _vault_unlock_time = 0
+        return False
+
+    # Fall 3: Kein Vault → First-Start, PQ-Wrap direkt aufbauen
     try:
         _dek = _pq_init_fresh(password)
-        log.info("🔒 Neuer Vault — PQ-Wrap (ML-KEM-768 + DEK) initialisiert")
+        _vault_unlock_time = time.time()
+        log.info("🔒 Neuer Vault — PQ-Wrap (Argon2id + ML-KEM-768 + DEK) initialisiert")
+        return True
     except Exception as e:
-        log.warning(f"⚠️ PQ-Init fehlgeschlagen: {e} — Legacy-Modus")
+        log.error(f"⚠️ PQ-Init fehlgeschlagen: {e}")
         _dek = None
-    return True
+        _vault_unlock_time = 0
+        return False
 
 
 def vault_setup(password: str, owner_username: str, owner_email: str) -> str:
-    """Vault erstmalig einrichten + Recovery-Seed zurückgeben."""
-    global _vault_master_key, _vault_unlock_time
-    mid = _get_machine_id().encode()
-    _vault_master_key = hashlib.sha256(
-        b'shinpai-kneipe-vault-v2' + password.encode('utf-8') + mid
-    ).digest()
+    """Vault erstmalig einrichten + Recovery-Seed zurückgeben.
+    PQ-only: _pq_init_fresh baut DEK/ML-KEM/Wrap-Files auf. Kein SHA256-Master-Key mehr."""
+    global _vault_unlock_time, _dek
+    # Recovery-Seed jetzt generieren — damit _pq_init_fresh den Seed-Backup direkt miterzeugt
+    seed = _generate_recovery_seed()
+    _dek = _pq_init_fresh(password, seed_phrase=seed)
     _vault_unlock_time = time.time()
-    # Identity-Vault schreiben (Owner-Info)
+
+    # Identity-Vault schreiben (Owner-Info, verschlüsselt mit DEK-abgeleitetem File-Key)
     identity = {
         'owner_username': owner_username,
         'owner_email': owner_email,
@@ -455,10 +594,10 @@ def vault_setup(password: str, owner_username: str, owner_email: str) -> str:
     with open(IDENTITY_VAULT, 'wb') as f:
         f.write(_vault_encrypt_bytes(json.dumps(identity).encode('utf-8')))
     os.chmod(IDENTITY_VAULT, 0o600)
-    # Recovery-Seed generieren + speichern
-    seed = _generate_recovery_seed()
+
+    # Recovery-Hash/Key-File (PW ↔ Seed-Kopplung für PW-Reset-Flow)
     _save_recovery_data(password, seed)
-    log.info(f'🔒 Vault eingerichtet für Owner "{owner_username}"')
+    log.info(f'🔒 Vault eingerichtet für Owner "{owner_username}" (Argon2id + ML-KEM-768)')
     return seed
 
 
@@ -8673,6 +8812,68 @@ class GameHandler(SimpleHTTPRequestHandler):
             else:
                 log.info('🔓 VAULT unlocked via Seed-Recovery (kein PW-Wechsel)')
             self._json_response(response)
+        elif path == '/api/vault/salt-info':
+            # Owner-only Salt-Metadata (für Sicherheits-Tab UI)
+            sess = self._get_session()
+            if not sess:
+                self._json_response({'error': 'Nicht eingeloggt'}, 401); return
+            conn_si = get_db('accounts.db')
+            owner_si = conn_si.execute('SELECT is_owner FROM users WHERE id = ?', (sess['user_id'],)).fetchone()
+            conn_si.close()
+            if not owner_si or not owner_si['is_owner']:
+                self._json_response({'error': 'Nur Owner'}, 403); return
+            meta = _salt_metadata()
+            now_ts = int(time.time())
+            meta['can_rotate_now'] = (not meta['present']) or now_ts >= meta['cooldown_until']
+            meta['seconds_until_ready'] = max(0, meta['cooldown_until'] - now_ts) if meta['present'] else 0
+            self._json_response(meta)
+        elif path == '/api/vault/salt-rotate':
+            # Salzstreuer: Owner + aktives 2FA + 24h Cooldown
+            sess = self._get_session()
+            if not sess:
+                self._json_response({'error': 'Nicht eingeloggt'}, 401); return
+            conn_sr = get_db('accounts.db')
+            owner_sr = conn_sr.execute(
+                'SELECT is_owner, totp_secret, totp_enabled FROM users WHERE id = ?',
+                (sess['user_id'],)
+            ).fetchone()
+            conn_sr.close()
+            if not owner_sr or not owner_sr['is_owner']:
+                self._json_response({'error': 'Nur Owner'}, 403); return
+            if not owner_sr['totp_enabled'] or not owner_sr['totp_secret']:
+                self._json_response({'error': '2FA Pflicht für den Salzstreuer'}, 403); return
+
+            pw = data.get('password', '')
+            totp_code = (data.get('totp') or data.get('totp_code') or '').strip()
+            if not pw:
+                self._json_response({'error': 'Passwort nötig'}, 400); return
+            if not totp_code:
+                self._json_response({'error': '2FA-Code nötig'}, 400); return
+
+            # 2FA prüfen
+            try:
+                secret = vault_decrypt(owner_sr['totp_secret'])
+            except Exception:
+                self._json_response({'error': '2FA-Secret nicht entschlüsselbar'}, 500); return
+            if not verify_totp(secret, totp_code):
+                self._json_response({'error': '2FA-Code falsch'}, 401); return
+
+            # Cooldown-Check
+            meta = _salt_metadata()
+            now_ts = int(time.time())
+            if meta['present'] and now_ts < meta['cooldown_until']:
+                self._json_response({
+                    'error': 'Ruhig, Kompaniechef. Mehr Salz gibts erst mit dem nächsten Tequila — morgen.',
+                    'cooldown_until': meta['cooldown_until'],
+                    'seconds_until_ready': meta['cooldown_until'] - now_ts,
+                }, 429); return
+
+            result = _pq_rotate_salt(pw)
+            if 'error' in result:
+                status_code = 401 if result['error'] == 'Passwort falsch' else 500
+                self._json_response(result, status_code); return
+            log.info(f'🧂 SALZSTREUER — Salt rotiert durch {sess.get("user_id")}')
+            self._json_response(result)
         elif path == '/api/owner/voice-config':
             sess = self._get_session()
             if not sess:

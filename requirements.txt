@@ -14,3 +14,6 @@ bitcoin-utils
 
 # PQ-Crypto (Post-Quantum)
 liboqs-python
+
+# KDF-Härtung (Vault-KEK via Argon2id — hard-coded 128MB/3/4/32, kein Fallback)
+argon2-cffi>=23.1
