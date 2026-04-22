@@ -741,18 +741,14 @@ function _startVAD() {
   _vadTimer = setInterval(_vadLoop, 16);
 }
 
-let _vadLoudSince = 0;
 function _vadLoop() {
   if (!_voiceActive) { _vadRunning = false; clearInterval(_vadTimer); _vadTimer = null; return; }
   _vadAnalyser.getByteFrequencyData(_vadFreqData);
   const avg = _vadFreqData.reduce((a,b) => a+b, 0) / _vadFreqData.length;
   const queueActive = _sessionVoiceQueue.playing || _sessionVoiceQueue.paused || _sessionVoiceQueue.items.length > 0;
-  // Höherer Threshold (25 statt 8) gegen Hintergrund + Musik
-  // Plus: Mindestens 250ms durchgehend laut bevor Recorder startet
-  if (avg > 25) {
+  if (avg > 8) {
     _vadSilenceSince = 0;
-    if (!_vadLoudSince) _vadLoudSince = Date.now();
-    if (!_vadIsLoud && !queueActive && (Date.now() - _vadLoudSince > 250)) {
+    if (!_vadIsLoud && !queueActive) {
       _vadIsLoud = true;
       _sessionVoiceQueue.pause();
       _voiceChunks = [];
@@ -762,15 +758,12 @@ function _vadLoop() {
         _voiceRecorder.start(100);
       } catch(_){}
     }
-  } else {
-    _vadLoudSince = 0;
-    if (_vadIsLoud) {
-      if (!_vadSilenceSince) _vadSilenceSince = Date.now();
-      if (Date.now() - _vadSilenceSince > 800) {
-        _vadIsLoud = false;
-        if (_voiceRecorder && _voiceRecorder.state === 'recording') { try { _voiceRecorder.stop(); } catch(_){} }
-        _sessionVoiceQueue.resume();
-      }
+  } else if (_vadIsLoud) {
+    if (!_vadSilenceSince) _vadSilenceSince = Date.now();
+    if (Date.now() - _vadSilenceSince > 800) {
+      _vadIsLoud = false;
+      if (_voiceRecorder && _voiceRecorder.state === 'recording') { try { _voiceRecorder.stop(); } catch(_){} }
+      _sessionVoiceQueue.resume();
     }
   }
 }
