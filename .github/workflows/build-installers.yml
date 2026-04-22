@@ -53,7 +53,7 @@ jobs:
 
       - name: Install build tools
         run: |
-          choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
+          choco install cmake.install --installargs 'ADD_CMAKE_TO_PATH=System' -y
 
       - name: Build liboqs from source
         shell: pwsh
