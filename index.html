@@ -1027,6 +1027,36 @@ body { background: #0a0a0a; color: #e0d8c8; font-family: 'Georgia', serif; min-h
         <button class="vote-btn" id="btn-tts-test" style="font-size:11px;">▶ Testen</button>
         <button class="vote-btn" id="btn-tts-save" style="font-size:11px;border-color:#d4a850;color:#d4a850;">💾 Speichern</button>
       </div>
+      <!-- 🎙️ Mikrofon-Sensibilität — direkte Reaktion, kein Save-Button -->
+      <div style="margin-top:14px;padding-top:14px;border-top:1px solid #2a2018;">
+        <div style="font-size:13px;color:#d4a850;margin-bottom:8px;">🎙️ Mikrofon-Sensibilität</div>
+        <div id="mic-preset-row" style="display:flex;gap:6px;margin-bottom:6px;">
+          <button class="mic-preset" data-preset="1" style="flex:1;padding:8px 4px;background:#0a0a0a;border:1px solid #3a3020;border-radius:4px;color:#e0d8c8;font-size:10px;cursor:pointer;line-height:1.2;">
+            Nimmt<br><b style="color:#d4a850">ALLES</b><br>auf
+          </button>
+          <button class="mic-preset" data-preset="2" style="flex:1;padding:8px 4px;background:#0a0a0a;border:1px solid #3a3020;border-radius:4px;color:#e0d8c8;font-size:10px;cursor:pointer;line-height:1.2;">
+            moderat<br><b style="color:#d4a850">ALLES</b><br>auf
+          </button>
+          <button class="mic-preset" data-preset="3" style="flex:1;padding:8px 4px;background:#0a0a0a;border:1px solid #3a3020;border-radius:4px;color:#e0d8c8;font-size:10px;cursor:pointer;line-height:1.2;">
+            moderat<br><b style="color:#d4a850">NIX</b><br>auf
+          </button>
+          <button class="mic-preset" data-preset="4" style="flex:1;padding:8px 4px;background:#0a0a0a;border:1px solid #3a3020;border-radius:4px;color:#e0d8c8;font-size:10px;cursor:pointer;line-height:1.2;">
+            nimmt<br><b style="color:#d4a850">NIX</b><br>auf
+          </button>
+        </div>
+        <div id="mic-preset-hint" style="font-size:11px;color:#aa9966;min-height:14px;margin-bottom:10px;">Preset aktiv</div>
+
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+          <span style="font-size:11px;color:#887755;">Live-Input (weiß = Schwelle):</span>
+          <button id="btn-mic-test" type="button" style="margin-left:auto;font-size:10px;padding:3px 8px;background:#0a0a0a;border:1px solid #3a3020;border-radius:4px;color:#aa9966;cursor:pointer;">🎙️ Mic-Test starten</button>
+        </div>
+        <div style="position:relative;height:16px;background:#1a1408;border:1px solid #3a3020;border-radius:4px;overflow:hidden;">
+          <div id="mic-balken" style="height:100%;width:0%;background:linear-gradient(90deg,#4a4 0%,#d4a850 60%,#d44 100%);transition:width 0.08s;"></div>
+          <div id="mic-threshold-marker" style="position:absolute;top:-2px;bottom:-2px;width:2px;background:#fff;box-shadow:0 0 4px #fff;pointer-events:none;"></div>
+        </div>
+        <input type="range" id="mic-slider" min="1" max="80" value="8" style="width:100%;margin-top:8px;accent-color:#d4a850;">
+        <div id="mic-manual-hint" style="font-size:10px;color:#665540;text-align:right;">Schwelle = 8</div>
+      </div>
     </div>
     <!-- PROFIL TABS (Owner sieht alle, User nur Sicherheit) -->
     <div id="prof-tabs" style="display:flex;gap:0;margin-top:15px;position:relative;">
@@ -1573,6 +1603,10 @@ function showScreen(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   document.getElementById(id).classList.add('active');
   if (id === 'login-screen') { updateLoginBanner(); updateChainFooter(); }
+  // Profil verlassen → Mic-Test sauber stoppen (nicht ungenutzt weiterlaufen lassen)
+  if (id !== 'profile-screen' && typeof _stopMicTest === 'function' && _micTestActive) {
+    _stopMicTest();
+  }
 }
 async function updateLoginBanner() {
   const banner = document.getElementById('login-share-banner');
@@ -2892,6 +2926,159 @@ let _vadIsLoud = false;
 let _vadSilenceSince = 0;
 let _vadMimeType = '';
 
+// --- Mikrofon-Sensibilität (direkte Reaktion, localStorage persistent) ---
+const MIC_PRESETS = {
+  '1': { thr: 5,  label: 'Nimmt <b style="color:#d4a850">ALLES</b> auf' },
+  '2': { thr: 25, label: 'Nimmt moderat <b style="color:#d4a850">ALLES</b> auf' },
+  '3': { thr: 42, label: 'Nimmt moderat <b style="color:#d4a850">NIX</b> auf' },
+  '4': { thr: 61, label: 'Nimmt so gut wie <b style="color:#d4a850">NIX</b> auf' },
+};
+let _micThreshold = parseInt(localStorage.getItem('kneipe-mic-thr') || '14');
+let _micPreset = localStorage.getItem('kneipe-mic-preset') || '2';
+let _micManual = localStorage.getItem('kneipe-mic-manual') === '1';
+// Bei Preset-Modus immer den aktuellen Preset-Wert nehmen (falls Presets geändert wurden)
+if (!_micManual && MIC_PRESETS[_micPreset]) {
+  _micThreshold = MIC_PRESETS[_micPreset].thr;
+}
+
+function _saveMicSens() {
+  localStorage.setItem('kneipe-mic-thr', String(_micThreshold));
+  localStorage.setItem('kneipe-mic-preset', _micPreset);
+  localStorage.setItem('kneipe-mic-manual', _micManual ? '1' : '0');
+}
+
+function _updateMicSensUI() {
+  // Preset-Buttons: aktiver hervorheben, bei manuell alle gedimmt
+  document.querySelectorAll('.mic-preset').forEach(btn => {
+    const isActive = btn.dataset.preset === _micPreset && !_micManual;
+    btn.style.background = isActive ? '#2a1f10' : '#0a0a0a';
+    btn.style.borderColor = isActive ? '#d4a850' : '#3a3020';
+    btn.style.opacity = _micManual ? '0.35' : (isActive ? '1' : '0.7');
+  });
+  const hint = document.getElementById('mic-preset-hint');
+  if (hint) {
+    if (_micManual) {
+      hint.innerHTML = '<b style="color:#887755">MANUELL eingestellt</b>';
+    } else {
+      hint.innerHTML = MIC_PRESETS[_micPreset].label;
+    }
+  }
+  const slider = document.getElementById('mic-slider');
+  if (slider && parseInt(slider.value) !== _micThreshold) slider.value = _micThreshold;
+  const manualHint = document.getElementById('mic-manual-hint');
+  if (manualHint) manualHint.textContent = `Schwelle = ${_micThreshold}${_micManual ? ' (manuell)' : ''}`;
+  const marker = document.getElementById('mic-threshold-marker');
+  if (marker) marker.style.left = Math.min(100, (_micThreshold / 80) * 100) + '%';
+}
+
+function _setMicPreset(n) {
+  _micPreset = String(n);
+  _micThreshold = MIC_PRESETS[_micPreset].thr;
+  _micManual = false;
+  _saveMicSens();
+  _updateMicSensUI();
+}
+
+function _setMicManual(thr) {
+  _micThreshold = Math.max(1, Math.min(80, parseInt(thr) || 8));
+  _micManual = true;
+  _saveMicSens();
+  _updateMicSensUI();
+}
+
+function _updateMicBalken(avg) {
+  const balken = document.getElementById('mic-balken');
+  if (!balken) return;
+  balken.style.width = Math.min(100, (avg / 80) * 100) + '%';
+}
+
+// Click-/Input-Handler ONE-TIME-binden sobald UI da ist
+function _initMicSensUI() {
+  const row = document.getElementById('mic-preset-row');
+  if (!row || row.dataset.bound) return;
+  row.dataset.bound = '1';
+  document.querySelectorAll('.mic-preset').forEach(btn => {
+    btn.addEventListener('click', () => _setMicPreset(btn.dataset.preset));
+  });
+  const slider = document.getElementById('mic-slider');
+  if (slider) {
+    slider.addEventListener('input', e => _setMicManual(e.target.value));
+  }
+  const testBtn = document.getElementById('btn-mic-test');
+  if (testBtn) {
+    testBtn.addEventListener('click', () => {
+      if (_micTestActive) _stopMicTest();
+      else _startMicTest();
+    });
+  }
+  _updateMicSensUI();
+}
+
+// --- Mic-Test (eigener Stream nur für Balken, ohne Voice-Chat zu aktivieren) ---
+let _micTestStream = null;
+let _micTestCtx = null;
+let _micTestAnalyser = null;
+let _micTestFreqData = null;
+let _micTestTimer = null;
+let _micTestActive = false;
+
+async function _startMicTest() {
+  if (_micTestActive) return;
+  // Wenn VAD schon läuft: nutzt der _vadLoop bereits _updateMicBalken. Kein Extra nötig.
+  if (_vadRunning) {
+    const btn = document.getElementById('btn-mic-test');
+    if (btn) { btn.textContent = '🎙️ Chat-Voice aktiv'; btn.style.color = '#4a4'; }
+    return;
+  }
+  try {
+    _micTestStream = await navigator.mediaDevices.getUserMedia({audio: true});
+  } catch (e) {
+    alert('Mikrofon nicht verfügbar!');
+    return;
+  }
+  _micTestCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const src = _micTestCtx.createMediaStreamSource(_micTestStream);
+  _micTestAnalyser = _micTestCtx.createAnalyser();
+  _micTestAnalyser.fftSize = 512;
+  src.connect(_micTestAnalyser);
+  _micTestFreqData = new Uint8Array(_micTestAnalyser.frequencyBinCount);
+  _micTestActive = true;
+  _micTestTimer = setInterval(() => {
+    if (!_micTestAnalyser) return;
+    _micTestAnalyser.getByteFrequencyData(_micTestFreqData);
+    const avg = _micTestFreqData.reduce((a,b) => a+b, 0) / _micTestFreqData.length;
+    _updateMicBalken(avg);
+  }, 50);
+  const btn = document.getElementById('btn-mic-test');
+  if (btn) {
+    btn.textContent = '🎙️ Test stoppen';
+    btn.style.color = '#d4a850';
+    btn.style.borderColor = '#d4a850';
+  }
+}
+
+function _stopMicTest() {
+  if (_micTestTimer) { clearInterval(_micTestTimer); _micTestTimer = null; }
+  if (_micTestStream) {
+    _micTestStream.getTracks().forEach(t => t.stop());
+    _micTestStream = null;
+  }
+  if (_micTestCtx) {
+    try { _micTestCtx.close(); } catch (_) {}
+    _micTestCtx = null;
+  }
+  _micTestAnalyser = null;
+  _micTestFreqData = null;
+  _micTestActive = false;
+  const btn = document.getElementById('btn-mic-test');
+  if (btn) {
+    btn.textContent = '🎙️ Mic-Test starten';
+    btn.style.color = '#aa9966';
+    btn.style.borderColor = '#3a3020';
+  }
+  _updateMicBalken(0);
+}
+
 // --- UI Buttons ---
 function toggleMuteUser(name) {
   if (_mutedUsers.has(name)) _mutedUsers.delete(name);
@@ -2979,7 +3166,10 @@ function _vadLoop() {
   // Queue aktiv? Nur neue Recordings blockieren, laufende laufen lassen (Boxen-Feedback-Schutz)
   const queueActive = _sessionVoiceQueue.playing || _sessionVoiceQueue.paused || _sessionVoiceQueue.items.length > 0;
 
-  if (avg > 8) {
+  // Live-Balken im Profil aktualisieren (falls sichtbar)
+  if (typeof _updateMicBalken === 'function') _updateMicBalken(avg);
+
+  if (avg > _micThreshold) {
     _vadSilenceSince = 0;
     if (!_vadIsLoud && !queueActive) {
       _vadIsLoud = true;
@@ -4046,6 +4236,9 @@ document.getElementById('btn-profile').onclick = async () => {
     if (v.id === data.tts_voice) opt.selected = true;
     voiceSelect.appendChild(opt);
   });
+
+  // Mikrofon-Sensibilität-UI einmalig binden + Status reflektieren
+  _initMicSensUI();
 
   showScreen('profile-screen');
 };

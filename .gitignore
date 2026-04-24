@@ -25,3 +25,14 @@ installer/Android/www/build/
 *.jks
 release/*.apk
 release/*.aab
+
+# Flutter build artifacts (regenerierbar)
+installer/Android/build/
+installer/Android/.dart_tool/
+installer/Android/.flutter-plugins
+installer/Android/.flutter-plugins-dependencies
+# Nicht genutzte Platforms — ignored, Linux und Windows bleiben aber drin!
+installer/Android/ios/
+installer/Android/macos/
+installer/Android/web/
+*.iml

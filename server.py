@@ -156,13 +156,25 @@ def _vault_decrypt_bytes(ciphertext: bytes, password: str = None) -> bytes:
 
 
 def vault_is_unlocked() -> bool:
-    """Vault-Status: entsperrt und nicht abgelaufen?"""
+    """Vault-Status: entsperrt und nicht abgelaufen?
+    Sliding Window: jeder erfolgreiche Check refresht den Timer (Owner-Activity = Keep-Alive).
+    Bei Timeout wird Igni-Auto-Refresh versucht bevor hart gelockt wird."""
+    global _vault_unlock_time
     if _dek is None:
         return False
     if time.time() - _vault_unlock_time > _VAULT_MAX_AGE:
+        # Auto-Lock naht — erst Igni-Refresh versuchen bevor hart gelockt wird
+        try:
+            igni_pw = igni_load()
+            if igni_pw and vault_unlock(igni_pw):
+                log.info('🔑 Igni-Auto-Refresh erfolgreich — Vault-Timer auf 24h zurückgesetzt')
+                return True
+        except Exception as e:
+            log.warning(f'Igni-Auto-Refresh-Fehler: {e}')
         vault_lock()
-        log.info('🔒 Vault: 24h Timeout — automatisch gesperrt')
+        log.info('🔒 Vault: 24h Timeout — automatisch gesperrt (kein Igni verfügbar)')
         return False
+    _vault_unlock_time = time.time()  # Sliding Window — active use extends lease
     return True
 
 
@@ -172,6 +184,30 @@ def vault_lock():
     _dek = None
     _vault_unlock_time = 0
     log.info('🔒 Vault gesperrt')
+
+
+def _vault_keeper_loop():
+    """Proaktiver Vault-Keeper: alle 60s prüfen ob Lock naht (<5min),
+    dann präventiv Igni-Auto-Refresh. Läuft als Daemon-Thread.
+    Vermeidet das Szenario wo Vault lockt zwischen zwei API-Calls und Server
+    in Ersteinrichtungszustand fällt (Bug 2026-04-24)."""
+    REFRESH_THRESHOLD = 300  # 5 Minuten vor Lock
+    while True:
+        try:
+            time.sleep(60)
+            if _dek is None:
+                continue  # Vault eh schon zu, Keeper inaktiv bis manueller Unlock
+            remaining = _VAULT_MAX_AGE - (time.time() - _vault_unlock_time)
+            if remaining > REFRESH_THRESHOLD:
+                continue
+            # Lock droht in <5min — Igni-Refresh versuchen
+            igni_pw = igni_load()
+            if igni_pw and vault_unlock(igni_pw):
+                log.info(f'🔑 Vault-Keeper: Igni-Refresh erfolgreich (Rest war {int(remaining)}s)')
+            else:
+                log.warning(f'🔑 Vault-Keeper: kein Igni oder Unlock failed — Vault lockt in {int(remaining)}s')
+        except Exception as e:
+            log.error(f'Vault-Keeper-Exception: {e}')
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -1115,11 +1151,38 @@ def _find_free_guest_slot():
                 return i
     return None
 
+def _leave_all_tische(user_id):
+    """User aus allen Tischen entfernen — Cleanup vor Session-Delete.
+    Verhindert Geist-Member die nach Session-Tod in t['members'] hängen
+    und später Crashes auslösen (z.B. DB-Lookup auf toten user_id in
+    TTS-Thread oder Vault-Op)."""
+    if 'raeume' not in globals():
+        return
+    try:
+        snapshot = list(raeume.items())
+    except Exception:
+        return
+    for _, r in snapshot:
+        try:
+            tische_items = list(r['tische'].items())
+        except Exception:
+            continue
+        for tid, tisch in tische_items:
+            try:
+                if user_id in tisch.get('members', set()):
+                    handle_tisch_leave(user_id, {'tisch_id': tid})
+            except Exception as e:
+                log.error(f'❌ Cleanup tisch-leave {user_id} ← {tid}: {e}')
+
 def _release_guest_slot(slot_nr, kicked=False):
     with guest_lock:
         slot = guest_slots.pop(slot_nr, None)
     kick_msg = None
     if slot:
+        user_id = slot.get('user_id')
+        # Geist-Member verhindern: Tisch-Leave BEVOR Session gelöscht wird
+        if user_id:
+            _leave_all_tische(user_id)
         # Account bleibt in DB (Pool!), nur Session löschen
         delete_session(slot['session_token'])
         if kicked:
@@ -1328,33 +1391,64 @@ def _guest_cleanup_thread():
             log.error(f'❌ Guest Cleanup Fehler: {e}')
         time.sleep(30)
 
-TISCH_INACTIVITY_TIMEOUT = 4 * 3600  # 4 Stunden ohne Nachricht = raus!
+TISCH_INACTIVITY_TIMEOUT = 3600  # 1 Stunde ohne Aktivität = raus!
+TISCH_EMPTY_RENEW_TIMEOUT = 3600  # 1 Stunde komplett leer → Tisch stirbt, neuer Platz
 
 def _tisch_inactivity_thread():
-    """Kickt User die 4h am Tisch sitzen ohne was zu sagen"""
+    """Zwei Aufgaben:
+    1. Kickt User die 1h am Tisch sitzen ohne Aktivität.
+    2. Ersetzt Tische die 1h durchgehend leer standen — nur dann! Timer
+       setzt zurück sobald jemand beitritt (empty_since=None) und
+       startet erst wenn der letzte Member aufsteht.
+    """
     while True:
         try:
             now = time.time()
             to_kick = []  # (tisch_id, user_id, name)
+            to_renew = []  # (raum_id, tisch_id)
             if 'raeume' not in globals() or not raeume:
                 time.sleep(300)
                 continue
             for r in raeume.values():
                 for tid, t in r['tische'].items():
+                    # 1) Member-AFK-Kick pro User
                     for uid in list(t['members']):
                         last = t['member_last_active'].get(uid, t['last_active'])
                         if now - last >= TISCH_INACTIVITY_TIMEOUT:
                             name = t['member_names'].get(uid, '???')
                             to_kick.append((tid, uid, name))
+                    # 2) Tisch-Leer-Renew — NUR wenn tatsächlich noch leer
+                    empty_since = t.get('empty_since')
+                    if (not t['members'] and empty_since is not None and
+                            now - empty_since >= TISCH_EMPTY_RENEW_TIMEOUT):
+                        to_renew.append((r['id'], tid))
+
             for tid, uid, name in to_kick:
                 handle_tisch_leave(uid, {'tisch_id': tid})
                 with chat_lock:
                     chat_rooms.setdefault(tid, []).append({
                         'system': True,
-                        'text': f'💤 {name} wurde nach 4h Stille vom Tisch geschickt.',
+                        'text': f'💤 {name} wurde nach 1h Stille vom Tisch geschickt.',
                         'time': time.time()
                     })
-                log.info(f'💤 INAKTIV-KICK — {name} ← {tid} (4h ohne Nachricht)')
+                log.info(f'💤 INAKTIV-KICK — {name} ← {tid} (1h ohne Aktivität)')
+
+            for raum_id, tid in to_renew:
+                with raum_lock:
+                    r = raeume.get(raum_id)
+                    if not r or tid not in r['tische']:
+                        continue
+                    # Doppelcheck innerhalb des Locks — nicht doch jemand reingekommen?
+                    if r['tische'][tid]['members']:
+                        r['tische'][tid]['empty_since'] = None
+                        continue
+                    del r['tische'][tid]
+                    new_t = spawn_tisch(raum_id)
+                    r['tische'][new_t['id']] = new_t
+                # Chat-History des alten Tischs löschen (Tisch ist tot)
+                with chat_lock:
+                    chat_rooms.pop(tid, None)
+                log.info(f'🔄 TISCH-RENEW — {tid} war 1h leer → neuer Tisch {new_t["id"]}')
         except Exception as e:
             log.error(f'❌ Tisch-Inaktivitäts-Cleanup Fehler: {e}')
         time.sleep(300)  # Alle 5 Minuten prüfen
@@ -1365,9 +1459,16 @@ def cleanup_sessions():
         time.sleep(3600)
         now = time.time()
         with sessions_lock:
-            expired = [k for k, v in sessions.items() if now - v['last_active'] > 86400]
-            for k in expired:
+            expired_uids = [(k, v['user_id']) for k, v in sessions.items()
+                            if now - v['last_active'] > 86400]
+            for k, _ in expired_uids:
                 del sessions[k]
+        # Tische aufräumen außerhalb des sessions_lock — verhindert Geist-Member
+        for _, uid in expired_uids:
+            try:
+                _leave_all_tische(uid)
+            except Exception as e:
+                log.error(f'❌ Session-Cleanup tisch-leave {uid}: {e}')
 threading.Thread(target=cleanup_sessions, daemon=True).start()
 
 # Unverified account cleanup thread (7 Tage)
@@ -4341,9 +4442,10 @@ def spawn_tisch(raum_id, user_name=''):
         'user_name': user_name[:120] if user_name else '',  # Optionaler User-Text
         'members': set(),
         'member_names': {},
-        'member_last_active': {},   # user_id → timestamp (4h Inaktivität = raus!)
+        'member_last_active': {},   # user_id → timestamp (1h Inaktivität = raus!)
         'windows_users': set(),
         'last_active': time.time(),
+        'empty_since': time.time(),  # Start leer → Renew-Timer tickt ab jetzt
         'password': '',  # Optionales Tisch-Passwort (leer = frei zugänglich)
         'adult_only': False,  # 18+ Flag — Kinder dürfen nicht joinen
         'mumupai_url': '',  # MuMuPai Streaming-Adresse (pro Tisch, jeder kann ändern)
@@ -5608,6 +5710,7 @@ def handle_tisch_join(user_id, data, is_windows=False, is_chromeos=False):
         t['member_names'][user_id] = name
         t['member_last_active'][user_id] = time.time()
         t['last_active'] = time.time()
+        t['empty_since'] = None  # Tisch wieder bewohnt → Renew-Timer stoppen
         if is_windows or is_chromeos:
             t['windows_users'].add(user_id)
         # Visit-Tracking für Raum (1h-Regel)
@@ -5663,6 +5766,9 @@ def handle_tisch_leave(user_id, data):
         t['member_names'].pop(user_id, None)
         t['member_last_active'].pop(user_id, None)
         t['windows_users'].discard(user_id)
+        # Tisch gerade leer geworden? Renew-Timer starten.
+        if not t['members'] and t.get('empty_since') is None:
+            t['empty_since'] = time.time()
         # Visit-Zeit berechnen
         if user_id in raum['visit_start']:
             visit_time = time.time() - raum['visit_start'].pop(user_id)
@@ -10264,6 +10370,10 @@ if __name__ == '__main__':
             log.info('🔒 Kein Igni gefunden — Vault gesperrt, Owner muss einloggen um zu entsperren')
     else:
         log.info('🌱 Kein Identity-Vault — First-Start-Modus (Owner muss eingerichtet werden)')
+
+    # Vault-Keeper-Thread: proaktiver Igni-Refresh bevor 24h-Lock greift
+    threading.Thread(target=_vault_keeper_loop, daemon=True, name='vault-keeper').start()
+    log.info('🔑 Vault-Keeper gestartet — prüft alle 60s auf Igni-Refresh-Bedarf')
 
     # Gast-Pool: Accounts bleiben, nur In-Memory Slots sind leer nach Neustart
     _conn_cleanup = get_db('accounts.db')
