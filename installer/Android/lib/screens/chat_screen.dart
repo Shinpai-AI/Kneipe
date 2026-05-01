@@ -1,14 +1,20 @@
 import 'dart:async';
-import 'dart:io';
-import 'package:audio_session/audio_session.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:just_audio/just_audio.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'package:record/record.dart';
+
+import '../audio/audio_session_manager.dart';
+import '../audio/sound_queue.dart';
+import '../audio/whisper_queue.dart';
 import '../session.dart';
 
+/// ChatScreen — UI-Schicht. Audio-Logik liegt in lib/audio/.
+///
+/// **Goldene Regeln (siehe Doku Kneipe-Flutter-App-Goldene-Regeln.md):**
+/// - Regel A (Speaker-Mode): Sound spielt → Mic stumm. Stille → Mic aktiv.
+/// - Regel B (Speaker-Mode): Mic-Input läuft → Sound wartet.
+/// - Regel C (alle Modi): SoundQueue + WhisperQueue → ChatQueue (FiFo stumpf).
+/// - Regel D: Kopfhörer nimmt immer auf, Handy pausiert bei Ton.
 class ChatScreen extends ConsumerStatefulWidget {
   final String tischId;
   const ChatScreen({super.key, required this.tischId});
@@ -17,80 +23,122 @@ class ChatScreen extends ConsumerStatefulWidget {
   ConsumerState<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends ConsumerState<ChatScreen>
-    with WidgetsBindingObserver {
-  // Hartkodiert auf Preset "moderat ALLES" (entspricht Web-Kneipe Preset 2).
-  // UI-Regler kommt später mit dem Profil-Ausbau — jetzt fest eingestellt.
-  static const _silenceThresholdDb = -20.0;
-  static const _silenceCutMs = 800; // match Web-Kneipe VAD
+class _ChatScreenState extends ConsumerState<ChatScreen> {
+  // === Audio ===
+  late final AudioSessionManager _audioSession;
+  late final SoundQueue _soundQueue;
+  late final WhisperQueue _whisperQueue;
 
+  // === UI-State ===
   final _textCtrl = TextEditingController();
   final _scrollCtrl = ScrollController();
-  // Recorder wird LAZY erst beim ersten Mic-Klick angelegt — sonst greift
-  // Android auf die Mic-Hardware zu obwohl wir nicht recorden.
-  AudioRecorder? _recorder;
-  final _player = AudioPlayer();
   final List<Map<String, dynamic>> _messages = [];
   final Set<String> _playedIds = {};
-  final List<Map<String, dynamic>> _playQueue = [];
   List<String> _tableMembers = const [];
   double _lastTs = 0;
-  Timer? _pollTimer;
   bool _sending = false;
   bool _joined = false;
-  bool _micArmed = false;
-  bool _recording = false;
-  bool _uploading = false;
-  bool _playing = false;
-  bool _speakerMode = true; // true = Lautsprecher, false = Kopfhörer
   bool _initialHistoryLoaded = false;
-  bool _chunkHadSpeech = false;
-  bool _queuePausedBySpeech = false; // Player pausiert weil User spricht (nur Speaker-Mode)
-  DateTime? _lastLoudAt;
-  String? _recordingPath;
   String? _error;
-  StreamSubscription<Amplitude>? _ampSub;
+
+  // Modus: speakerMode true = Handy-Modus, false = Kopfhörer-Modus.
+  bool _speakerMode = true;
+
+  // Banner-Logs für Debug-Sichtbarkeit (max 8 letzte Einträge)
+  final List<String> _micLog = [];
+  void _appendLog(String s) {
+    if (!mounted) return;
+    setState(() {
+      _micLog.add('${DateTime.now().toIso8601String().substring(11, 19)} $s');
+      if (_micLog.length > 8) _micLog.removeAt(0);
+    });
+  }
+
+  Timer? _pollTimer;
+  StreamSubscription<void>? _routingSub;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
+    final session = ref.read(activeSessionProvider);
+    if (session == null) {
+      _error = 'Keine aktive Session';
+      return;
+    }
+
+    _audioSession = AudioSessionManager();
+    _soundQueue = SoundQueue(client: session.client, baseUrl: session.baseUrl);
+    _whisperQueue = WhisperQueue(client: session.client, tischId: widget.tischId);
+
+    // Cross-wiring: Sound-Queue weckt Mic-Reset am Burst-Ende.
+    _soundQueue.onBurstEnd = _whisperQueue.resetAfterBurst;
+
+    // UI-Refresh wenn sich was in den Queues ändert.
+    _soundQueue.onChanged = _markDirty;
+    _whisperQueue.onChanged = _markDirty;
+    _whisperQueue.onError = (m) {
+      if (mounted) setState(() => _error = m);
+    };
+    // Debug-Logs ins Banner.
+    _audioSession.onLog = _appendLog;
+    _soundQueue.onLog = _appendLog;
+    _whisperQueue.onLog = _appendLog;
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _setupAudio();
-      _joinAndStart();
+      _bootstrap();
     });
+  }
+
+  Future<void> _bootstrap() async {
+    // v0.8.5: Reihenfolge KRITISCH. Player-AudioAttributes MUST vor
+    // AudioSession-Config gesetzt werden — sonst ignoriert Android die
+    // Player-Attributes und greift nur auf Session-Routing zurück.
+    // Lehre aus v0.7.25: in setupAudio() wurde _player.setAndroidAudioAttributes
+    // VOR session.configure aufgerufen.
+    await _soundQueue.setupPlayer();
+    await _audioSession.setup();
+    await _whisperQueue.initWhisper();
+
+    // Profil holen → MyUserId für Tote-Voice-Filter.
+    try {
+      final session = ref.read(activeSessionProvider);
+      if (session != null) {
+        final profile = await session.client.getMyProfile();
+        _whisperQueue.myUserId = profile['id']?.toString();
+      }
+    } catch (_) {}
+
+    // Routing-Listener.
+    _routingSub = _audioSession.devicesChangedStream.listen((_) async {
+      final isHp = await _audioSession.isHeadphoneActive();
+      final newSpeaker = !isHp;
+      if (newSpeaker != _speakerMode) {
+        if (mounted) setState(() => _speakerMode = newSpeaker);
+        _whisperQueue.speakerMode = newSpeaker;
+      }
+    });
+    final initialHp = await _audioSession.isHeadphoneActive();
+    if (mounted) setState(() => _speakerMode = !initialHp);
+    _whisperQueue.speakerMode = !initialHp;
+
+    // Tisch beitreten + Polling starten.
+    await _joinAndStart();
+  }
+
+  void _markDirty() {
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
     _pollTimer?.cancel();
-    _ampSub?.cancel();
-    _player.dispose();
-    _recorder?.dispose();
-    _recorder = null;
+    _routingSub?.cancel();
+    _soundQueue.dispose();
+    _whisperQueue.dispose();
     _leaveIfJoined();
     _textCtrl.dispose();
     _scrollCtrl.dispose();
     super.dispose();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      if (_joined && _pollTimer == null) {
-        _startPolling();
-      } else if (!_joined) {
-        _joinAndStart();
-      }
-    }
-  }
-
-  Future<void> _setupAudio() async {
-    try {
-      final session = await AudioSession.instance;
-      await session.configure(const AudioSessionConfiguration.music());
-    } catch (_) {}
   }
 
   Future<void> _leaveIfJoined() async {
@@ -113,11 +161,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         _error = null;
       });
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _error = 'Tisch beitreten fehlgeschlagen: $e';
-        });
-      }
+      if (mounted) setState(() => _error = 'Tisch beitreten: $e');
       return;
     }
     _fetchMembers();
@@ -142,10 +186,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       ) as Map<String, dynamic>;
       final names =
           (myTable['names'] as List?)?.cast<String>() ?? const <String>[];
-      if (!mounted) return;
-      setState(() {
-        _tableMembers = names;
-      });
+      if (mounted) setState(() => _tableMembers = names);
     } catch (_) {}
   }
 
@@ -162,317 +203,64 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         widget.tischId,
         since: _lastTs > 0 ? _lastTs : null,
       );
-      if (!mounted) return;
-      if (data.isNotEmpty) {
-        final newMessages = data.cast<Map<String, dynamic>>();
-        setState(() {
-          _messages.addAll(newMessages);
-          _lastTs =
-              (newMessages.last['time'] as num?)?.toDouble() ?? _lastTs;
-          _error = null;
-        });
-        _scrollToBottom();
-        if (newMessages.any((m) => m['system'] == true)) {
-          _fetchMembers();
-        }
-        if (!_initialHistoryLoaded) {
-          for (final m in newMessages) {
-            final url = (m['file_url'] ?? m['tts_url'])?.toString();
-            if (url == null || url.isEmpty) continue;
-            _playedIds.add('${m['time']}_$url');
-          }
-        } else {
-          for (final m in newMessages) {
-            final url = (m['file_url'] ?? m['tts_url'])?.toString();
-            if (url == null || url.isEmpty) continue;
-            final id = '${m['time']}_$url';
-            if (_playedIds.contains(id)) continue;
-            _playedIds.add(id);
-            _enqueueAutoplay(m);
-          }
-        }
-      }
-      if (!_initialHistoryLoaded) {
-        _initialHistoryLoaded = true;
-        // Multiple scroll attempts after layout settles — ListView sometimes
-        // has no maxScrollExtent on first layout pass.
-        for (final delay in [100, 300, 600, 1000]) {
-          Future.delayed(Duration(milliseconds: delay), () {
-            if (mounted && _scrollCtrl.hasClients) {
-              _scrollCtrl.jumpTo(_scrollCtrl.position.maxScrollExtent);
-            }
-          });
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _error = e.toString();
-        });
-      }
-    }
-  }
+      if (!mounted || data.isEmpty) return;
 
-  void _enqueueAutoplay(Map<String, dynamic> msg) {
-    _playQueue.add(msg);
-    if (!_playing) {
-      _runQueue();
-    }
-  }
+      final newMessages = data.cast<Map<String, dynamic>>();
+      final wasAtBottom = !_scrollCtrl.hasClients ||
+          _scrollCtrl.position.pixels >=
+              _scrollCtrl.position.maxScrollExtent - 60;
 
-  Future<void> _runQueue() async {
-    if (_playing) return;
-    if (mounted) setState(() => _playing = true);
-    // NEU v0.4.2: Mic läuft immer parallel. Nur der Player pausiert (nicht
-    // das Mic) wenn im Speaker-Mode Sprache detected wird — Echo-Schutz.
-    // Im Kopfhörer-Mode läuft alles komplett parallel ohne Pause.
-    try {
-      while (_playQueue.isNotEmpty && mounted) {
-        final msg = _playQueue.removeAt(0);
-        try {
-          await _playOne(msg);
-        } catch (e) {
-          if (mounted) setState(() => _error = 'Voice übersprungen: $e');
-        }
-      }
-    } finally {
-      if (mounted) setState(() => _playing = false);
-    }
-  }
-
-  Future<void> _playOne(Map<String, dynamic> msg) async {
-    final session = ref.read(activeSessionProvider);
-    if (session == null) return;
-    final url = (msg['file_url'] ?? msg['tts_url'])?.toString();
-    if (url == null || url.isEmpty) return;
-
-    final absUrl = Uri.parse(session.baseUrl).resolve(url).toString();
-    final bytes = await session.client
-        .fetchFile(absUrl)
-        .timeout(const Duration(seconds: 8));
-    final dir = await getTemporaryDirectory();
-    final ext = url.endsWith('.wav')
-        ? 'wav'
-        : url.endsWith('.mp3')
-            ? 'mp3'
-            : url.endsWith('.m4a') || url.endsWith('.mp4')
-                ? 'm4a'
-                : 'webm';
-    final path =
-        '${dir.path}/play_${DateTime.now().microsecondsSinceEpoch}.$ext';
-    await File(path).writeAsBytes(bytes);
-    await _player.setFilePath(path).timeout(const Duration(seconds: 5));
-    // v0.2.2 Form: Listener auf completed ODER idle (idle fängt Edge-Cases
-    // wo Player nach Fehler in idle rutscht statt completed zu emitten).
-    final completer = Completer<void>();
-    late StreamSubscription<PlayerState> sub;
-    sub = _player.playerStateStream.listen((s) {
-      if (s.processingState == ProcessingState.completed ||
-          s.processingState == ProcessingState.idle) {
-        if (!completer.isCompleted) completer.complete();
-      }
-    });
-    try {
-      await _player.play();
-      await completer.future;
-    } finally {
-      await sub.cancel();
-    }
-  }
-
-  Future<void> _pauseRecording() async {
-    final r = _recorder;
-    if (r == null) return;
-    try {
-      if (await r.isRecording()) {
-        await r.pause();
-      }
-    } catch (_) {}
-  }
-
-  Future<void> _resumeRecording() async {
-    final r = _recorder;
-    if (r == null) return;
-    try {
-      if (await r.isPaused()) {
-        await r.resume();
-      }
-    } catch (_) {}
-  }
-
-  // ============================================================
-  //  Mikrofon-Toggle (VAD-Chunking)
-  // ============================================================
-
-  Future<void> _toggleMic() async {
-    if (_micArmed) {
-      await _disarmMic();
-    } else {
-      await _armMic();
-    }
-  }
-
-  Future<void> _armMic() async {
-    final perm = await Permission.microphone.request();
-    if (!perm.isGranted) {
-      if (mounted) {
-        setState(() => _error = 'Mikrofon-Berechtigung fehlt');
-      }
-      return;
-    }
-    // LAZY: Recorder wird erst jetzt instanziiert, nicht schon im initState.
-    // Verhindert passiven Mic-Zugriff auf Android wenn User Mic nie benutzt.
-    _recorder ??= AudioRecorder();
-    if (mounted) {
       setState(() {
-        _micArmed = true;
+        _messages.addAll(newMessages);
+        _lastTs = (newMessages.last['time'] as num?)?.toDouble() ?? _lastTs;
         _error = null;
       });
-    }
-    await _startChunk();
-  }
+      if (wasAtBottom) _scrollToBottomForce();
 
-  Future<void> _disarmMic() async {
-    if (mounted) setState(() => _micArmed = false);
-    await _ampSub?.cancel();
-    _ampSub = null;
-    await _stopChunkAndMaybeSend();
-    // Recorder komplett disposen damit die Mic-Hardware freigegeben wird.
-    try {
-      await _recorder?.dispose();
-    } catch (_) {}
-    _recorder = null;
-  }
+      if (newMessages.any((m) => m['system'] == true)) {
+        _fetchMembers();
+      }
 
-  Future<void> _startChunk() async {
-    final r = _recorder;
-    if (r == null) return;
-    try {
-      final dir = await getTemporaryDirectory();
-      final path =
-          '${dir.path}/rec_${DateTime.now().microsecondsSinceEpoch}.m4a';
-      _chunkHadSpeech = false;
-      _lastLoudAt = null;
-      await r.start(
-        const RecordConfig(
-          encoder: AudioEncoder.aacLc,
-          bitRate: 48000,
-          sampleRate: 22050,
-          numChannels: 1,
-        ),
-        path: path,
-      );
-      if (!mounted) return;
-      setState(() {
-        _recording = true;
-        _recordingPath = path;
-      });
-      await _ampSub?.cancel();
-      _ampSub = r
-          .onAmplitudeChanged(const Duration(milliseconds: 150))
-          .listen(_onAmplitude);
+      if (!_initialHistoryLoaded) {
+        // Beim ersten Poll: alle vorhandenen Messages als "schon gespielt"
+        // markieren — kein Autoplay des kompletten Verlaufs.
+        for (final m in newMessages) {
+          final url = (m['file_url'] ?? m['tts_url'])?.toString();
+          if (url == null || url.isEmpty) continue;
+          _playedIds.add('${m['time']}_$url');
+        }
+        _initialHistoryLoaded = true;
+      } else {
+        for (final m in newMessages) {
+          final url = (m['file_url'] ?? m['tts_url'])?.toString();
+          if (url == null || url.isEmpty) continue;
+          final id = '${m['time']}_$url';
+          if (_playedIds.contains(id)) continue;
+          _playedIds.add(id);
+
+          // Tote-Voice-Filter: eigene Voice → silent (in Queue, aber nicht spielen).
+          final senderId = m['user_id']?.toString();
+          final isOwn = _whisperQueue.myUserId != null &&
+              senderId == _whisperQueue.myUserId;
+          if (isOwn) {
+            m[SoundQueue.silentFlag] = true;
+          }
+          _soundQueue.enqueue(m);
+        }
+      }
     } catch (e) {
-      if (mounted) setState(() => _error = 'Aufnahme: $e');
+      if (mounted) setState(() => _error = 'Poll: $e');
     }
   }
 
-  void _onAmplitude(Amplitude amp) {
-    if (_uploading) return;
-    final now = DateTime.now();
-    final isLoud = amp.current > _silenceThresholdDb;
-    if (isLoud) {
-      _chunkHadSpeech = true;
-      _lastLoudAt = now;
-      // NEU v0.4.2: In Speaker-Mode bei Sprache → Player PAUSIEREN (nicht
-      // abbrechen!) damit kein Echo aufgenommen wird. Kopfhörer-Mode: nichts.
-      if (_speakerMode && _playing && !_queuePausedBySpeech) {
-        _queuePausedBySpeech = true;
-        _player.pause().catchError((_) {});
-      }
-    } else if (_chunkHadSpeech && _lastLoudAt != null) {
-      final silenceMs = now.difference(_lastLoudAt!).inMilliseconds;
-      if (silenceMs > _silenceCutMs) {
-        _chunkBreakAndContinue();
-      }
-    }
-  }
-
-  Future<void> _chunkBreakAndContinue() async {
-    final wasArmed = _micArmed;
-    await _ampSub?.cancel();
-    _ampSub = null;
-    await _stopChunkAndMaybeSend();
-    // NEU v0.4.2: Player war wegen Sprache pausiert → jetzt Resume!
-    if (_queuePausedBySpeech) {
-      _queuePausedBySpeech = false;
-      try {
-        await _player.play();
-      } catch (_) {}
-    }
-    if (wasArmed && _micArmed) {
-      await _startChunk();
-    }
-  }
-
-  Future<void> _stopChunkAndMaybeSend() async {
-    if (!_recording) return;
-    final rawPath = _recordingPath;
-    String? stoppedPath;
-    try {
-      stoppedPath = await _recorder?.stop();
-    } catch (_) {}
-    if (mounted) {
-      setState(() {
-        _recording = false;
-      });
-    }
-    final actualPath = stoppedPath ?? rawPath ?? '';
-    if (actualPath.isEmpty) return;
-    final file = File(actualPath);
-    if (!await file.exists()) return;
-    final shouldSend = _chunkHadSpeech;
-    if (mounted && shouldSend) {
-      setState(() => _uploading = true);
-    }
-    try {
-      await Future<void>.delayed(const Duration(milliseconds: 150));
-      final bytes = await file.readAsBytes();
-      await file.delete();
-      if (!shouldSend || bytes.isEmpty) return;
-      final session = ref.read(activeSessionProvider);
-      if (session == null) return;
-      await session.client.sendVoice(
-        widget.tischId,
-        bytes,
-        filename: 'Voice.m4a',
-        filetype: 'audio/mp4',
-      );
-      await _pollOnce();
-    } catch (e) {
-      if (mounted) setState(() => _error = 'Voice senden: $e');
-    } finally {
-      if (mounted) {
-        setState(() {
-          _uploading = false;
-          _recordingPath = null;
-        });
-      }
-    }
-  }
-
-  // ============================================================
-  //  Text-Send + Playback-Manual
-  // ============================================================
-
-  void _scrollToBottom() {
+  void _scrollToBottomForce() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollCtrl.hasClients) {
-        _scrollCtrl.animateTo(
-          _scrollCtrl.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOut,
-        );
-      }
+      if (!_scrollCtrl.hasClients) return;
+      _scrollCtrl.animateTo(
+        _scrollCtrl.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+      );
     });
   }
 
@@ -481,65 +269,45 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     if (text.isEmpty) return;
     final session = ref.read(activeSessionProvider);
     if (session == null) return;
-    setState(() {
-      _sending = true;
-    });
+    setState(() => _sending = true);
     try {
       await session.client.sendChat(widget.tischId, text);
       _textCtrl.clear();
       await _pollOnce();
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _error = 'Senden fehlgeschlagen: $e';
-        });
-      }
+      if (mounted) setState(() => _error = 'Senden: $e');
     } finally {
-      if (mounted) {
-        setState(() {
-          _sending = false;
-        });
-      }
+      if (mounted) setState(() => _sending = false);
     }
   }
 
-  Future<void> _playMessage(Map<String, dynamic> msg) async {
-    final url = (msg['file_url'] ?? msg['tts_url'])?.toString();
-    if (url == null || url.isEmpty) return;
-    final session = ref.read(activeSessionProvider);
-    if (session == null) return;
-    try {
-      final absUrl = Uri.parse(session.baseUrl).resolve(url).toString();
-      final bytes = await session.client.fetchFile(absUrl);
-      final dir = await getTemporaryDirectory();
-      final ext = url.endsWith('.wav')
-          ? 'wav'
-          : url.endsWith('.mp3')
-              ? 'mp3'
-              : url.endsWith('.m4a') || url.endsWith('.mp4')
-                  ? 'm4a'
-                  : 'webm';
-      final path =
-          '${dir.path}/manual_${DateTime.now().microsecondsSinceEpoch}.$ext';
-      await File(path).writeAsBytes(bytes);
-      try {
-        await _player.stop();
-        await _player.seek(Duration.zero);
-      } catch (_) {}
-      await _player.setFilePath(path);
-      await _player.play();
-    } catch (e) {
-      if (mounted) setState(() => _error = 'Abspielen: $e');
+  void _playMessageManually(Map<String, dynamic> msg) {
+    // Manueller Klick: Tote-Voice-Marker abnehmen damit eigene Voice trotzdem spielt.
+    final cleaned = Map<String, dynamic>.from(msg)..remove(SoundQueue.silentFlag);
+    _soundQueue.enqueue(cleaned);
+  }
+
+  Future<void> _toggleMic() async {
+    if (_whisperQueue.armed) {
+      await _whisperQueue.disarm();
+    } else {
+      final ok = await _whisperQueue.arm();
+      if (!ok && mounted) setState(() => _error = 'Mikrofon-Berechtigung fehlt');
     }
+    if (mounted) setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
+    final isPlaying = _soundQueue.isPlaying;
+    final whisperLen = _whisperQueue.queueLength;
+    final whisperOverloaded = _whisperQueue.overloaded;
+
     return Scaffold(
       appBar: AppBar(
         title: Text('Tisch ${widget.tischId}'),
         actions: [
-          if (_playing)
+          if (isPlaying)
             const Padding(
               padding: EdgeInsets.only(right: 12),
               child: Center(
@@ -558,42 +326,30 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
             Container(
               width: double.infinity,
               color: Colors.amber.shade50,
-              padding: const EdgeInsets.symmetric(
-                horizontal: 12,
-                vertical: 8,
-              ),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               child: Row(
                 children: [
-                  Icon(
-                    Icons.people_outline,
-                    size: 16,
-                    color: Colors.grey.shade700,
-                  ),
+                  Icon(Icons.people_outline,
+                      size: 16, color: Colors.grey.shade700),
                   const SizedBox(width: 6),
                   Expanded(
                     child: Wrap(
                       spacing: 4,
                       runSpacing: 4,
                       children: _tableMembers
-                          .map(
-                            (n) => Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 2,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.white,
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(
-                                  color: Colors.amber.shade200,
+                          .map((n) => Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                      color: Colors.amber.shade200),
                                 ),
-                              ),
-                              child: Text(
-                                n,
-                                style: const TextStyle(fontSize: 11),
-                              ),
-                            ),
-                          )
+                                child: Text(n,
+                                    style: const TextStyle(fontSize: 11)),
+                              ))
                           .toList(),
                     ),
                   ),
@@ -607,18 +363,60 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
               itemCount: _messages.length,
               itemBuilder: (_, i) => _MessageTile(
                 message: _messages[i],
-                onPlay: () => _playMessage(_messages[i]),
+                onPlay: () => _playMessageManually(_messages[i]),
               ),
             ),
           ),
+          if (whisperOverloaded)
+            Container(
+              color: Colors.orange.shade100,
+              padding: const EdgeInsets.all(8),
+              width: double.infinity,
+              child: Text(
+                '⚠ Whisper überlastet ($whisperLen Aufnahmen offen) — bitte kurz Pause',
+                style: TextStyle(
+                  color: Colors.orange.shade900,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            )
+          else if (whisperLen > 0)
+            Container(
+              color: Colors.green.shade50,
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              width: double.infinity,
+              child: Text(
+                'Whisper bereit · $whisperLen im Hintergrund',
+                style: TextStyle(
+                    color: Colors.green.shade800, fontSize: 11),
+              ),
+            ),
           if (_error != null)
             Container(
               color: Colors.red.shade50,
               padding: const EdgeInsets.all(8),
               width: double.infinity,
-              child: Text(
-                _error!,
-                style: TextStyle(color: Colors.red.shade700),
+              child: Text(_error!,
+                  style: TextStyle(color: Colors.red.shade700)),
+            ),
+          // v0.8.6: Debug-Banner — letzte 8 Audio-Events live sichtbar.
+          if (_micLog.isNotEmpty)
+            Container(
+              color: Colors.grey.shade100,
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              width: double.infinity,
+              constraints: const BoxConstraints(maxHeight: 110),
+              child: SingleChildScrollView(
+                reverse: true,
+                child: Text(
+                  _micLog.join('\n'),
+                  style: const TextStyle(
+                    fontSize: 10,
+                    fontFamily: 'monospace',
+                    color: Colors.black87,
+                  ),
+                ),
               ),
             ),
           SafeArea(
@@ -628,33 +426,23 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                 children: [
                   IconButton(
                     tooltip: _speakerMode
-                        ? 'Lautsprecher-Modus (Mic pausiert bei Playback)'
-                        : 'Kopfhörer-Modus (Mic läuft parallel)',
-                    icon: Icon(
-                      _speakerMode
-                          ? Icons.volume_up
-                          : Icons.headphones,
-                    ),
+                        ? 'Lautsprecher-Modus'
+                        : 'Kopfhörer-Modus',
+                    icon: Icon(_speakerMode
+                        ? Icons.volume_up
+                        : Icons.headphones),
                     onPressed: () {
                       setState(() => _speakerMode = !_speakerMode);
+                      _whisperQueue.speakerMode = _speakerMode;
                     },
                   ),
                   IconButton.filled(
-                    tooltip: _micArmed
+                    tooltip: _whisperQueue.armed
                         ? 'Mikrofon stoppen'
                         : 'Mikrofon aktivieren',
-                    icon: _uploading
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.white,
-                            ),
-                          )
-                        : Icon(_micArmed ? Icons.stop : Icons.mic),
+                    icon: Icon(_whisperQueue.armed ? Icons.stop : Icons.mic),
                     style: IconButton.styleFrom(
-                      backgroundColor: _micArmed
+                      backgroundColor: _whisperQueue.armed
                           ? Colors.red
                           : Theme.of(context).colorScheme.primary,
                     ),
@@ -682,7 +470,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                         ? const SizedBox(
                             width: 16,
                             height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
+                            child:
+                                CircularProgressIndicator(strokeWidth: 2),
                           )
                         : const Icon(Icons.send),
                   ),

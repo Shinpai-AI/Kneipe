@@ -291,11 +291,27 @@ packages:
     description: flutter
     source: sdk
     version: "0.0.0"
+  flutter_tts:
+    dependency: "direct main"
+    description:
+      name: flutter_tts
+      sha256: ce5eb209b40e95f2f4a1397116c87ab2fcdff32257d04ed7a764e75894c03775
+      url: "https://pub.dev"
+    source: hosted
+    version: "4.2.5"
   flutter_web_plugins:
     dependency: transitive
     description: flutter
     source: sdk
     version: "0.0.0"
+  freezed_annotation:
+    dependency: transitive
+    description:
+      name: freezed_annotation
+      sha256: "7294967ff0a6d98638e7acb774aac3af2550777accd8149c90af5b014e6d44d8"
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.1.0"
   frontend_server_client:
     dependency: transitive
     description:
@@ -1021,6 +1037,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.2.1"
+  whisper_ggml_plus:
+    dependency: "direct main"
+    description:
+      name: whisper_ggml_plus
+      sha256: "484950d7767078bd3256fbb256d663322e33de359537a3f3ae0c82607ebebc5c"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.5.2"
   win32:
     dependency: transitive
     description:

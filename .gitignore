@@ -36,3 +36,16 @@ installer/Android/ios/
 installer/Android/macos/
 installer/Android/web/
 *.iml
+
+# Local backup snapshots der Flutter-App (ueber 100MB pro Stueck, zu gross fuer Github)
+installer/Android.backup-*/
+
+# Whisper-Modelle (regenerierbar via Download, > 100MB GitHub-Limit)
+installer/Android/assets/models/*.bin
+installer/Android/assets/models/*.gguf
+
+# APKs und Build-Artefakte
+*.apk
+*.aab
+**/build/intermediates/
+**/build/outputs/

@@ -6,7 +6,7 @@ Vision 1: Durchsage + Tresen + PQ-Crypto (ML-DSA-65 + ML-KEM-768)
   + Nexus-Trust-Whitelist + Session-Limit + Sovereign-Pocket-Deployment.
 Shinpai Games | Ist einfach passiert. 🐉"""
 
-VERSION = "1.5.0"
+VERSION = "2.0.0"
 
 import asyncio, base64, hashlib, hmac, io, json, logging, os, re, secrets, sqlite3, time, threading, uuid
 from http.server import HTTPServer, ThreadingHTTPServer, SimpleHTTPRequestHandler
@@ -1062,6 +1062,26 @@ def check_rate_limit(ip):
         rate_store[ip].append(now)
         return True
 
+# --- VERIFY-LOCKOUT (Hasi 30.04.: 5 Fehlversuche → 5 Min Pause) ---
+_VERIFY_FAIL_LIMIT = 5
+_VERIFY_FAIL_WINDOW = 300
+verify_fail_store = {}
+verify_fail_lock = threading.Lock()
+
+def verify_is_locked(ip):
+    """True wenn IP wegen Fehlversuchen aktuell gesperrt."""
+    now = time.time()
+    with verify_fail_lock:
+        attempts = [t for t in verify_fail_store.get(ip, []) if now - t < _VERIFY_FAIL_WINDOW]
+        verify_fail_store[ip] = attempts
+        return len(attempts) >= _VERIFY_FAIL_LIMIT
+
+def verify_record_fail(ip):
+    """Fehlversuch protokollieren."""
+    now = time.time()
+    with verify_fail_lock:
+        verify_fail_store.setdefault(ip, []).append(now)
+
 # --- SESSION MANAGEMENT ---
 sessions = {}  # token → {user_id, created, last_active}
 sessions_lock = threading.Lock()
@@ -1990,13 +2010,14 @@ def _selftest_url(test_url, timeout=6):
     Funktioniert nur mit ThreadingHTTPServer (damit wir parallel requesten + handlen können)!
     """
     try:
-        import urllib.request, ssl
+        import urllib.request
         if not test_url.startswith(('http://', 'https://')):
             test_url = 'http://' + test_url
+        klasse, _err = _classify_connection(test_url)
+        if klasse == 'REJECTED':
+            return False
+        ctx = _make_ssl_context(klasse)
         req = urllib.request.Request(f'{test_url.rstrip("/")}/api/status')
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
             body = resp.read(4096).decode('utf-8', 'replace')
         remote = json.loads(body) if body else {}
@@ -2275,9 +2296,73 @@ def verify_nexus_trust(nx_url):
     return (nexus_code_hash_is_trusted(code_hash), code_hash, version)
 
 
+def _classify_connection(url):
+    """TLS-Architektur: klassifiziert Outbound-URL in eine von vier Welten.
+    Returns (klasse, err_or_none).
+    Klassen: DOMAIN_SECURE | LAN_HTTP | PUBLIC_IP_HTTP | REJECTED
+    """
+    from urllib.parse import urlparse
+    import ipaddress as _ipa
+    parsed = urlparse((url or '').rstrip('/'))
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+        return 'REJECTED', 'Ungültige URL oder unbekanntes Schema'
+    host = parsed.hostname
+    try:
+        ip_obj = _ipa.ip_address(host)
+    except ValueError:
+        if parsed.scheme != 'https':
+            return 'REJECTED', 'Domain erfordert HTTPS, kein HTTP-Fallback'
+        return 'DOMAIN_SECURE', None
+    if parsed.scheme != 'http':
+        return 'REJECTED', 'HTTPS auf nackter IP nicht erlaubt — selbst-signiert verboten'
+    if ip_obj.is_loopback or ip_obj.is_private or ip_obj.is_link_local:
+        return 'LAN_HTTP', None
+    if ip_obj.is_multicast or ip_obj.is_reserved or ip_obj.is_unspecified:
+        return 'REJECTED', 'IP-Adresse nicht erlaubt'
+    return 'PUBLIC_IP_HTTP', None
+
+
+def _make_ssl_context(klasse):
+    """Liefert SSL-Kontext gemäß TLS-Architektur.
+    DOMAIN_SECURE → Default-Kontext (echte Cert-Verifikation, niemals aufweichen).
+    LAN_HTTP / PUBLIC_IP_HTTP / REJECTED → None (kein TLS).
+    """
+    if klasse == 'DOMAIN_SECURE':
+        import ssl as _ssl_local
+        return _ssl_local.create_default_context()
+    return None
+
+
+def _is_safe_outbound_host(host):
+    """SSRF-Guard: blockiert loopback/private/link-local/multicast/reserved Adressen."""
+    import ipaddress, socket
+    try:
+        addrs = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return False
+    for entry in addrs:
+        try:
+            ip = ipaddress.ip_address(entry[4][0])
+        except ValueError:
+            continue
+        if (ip.is_loopback or ip.is_private or ip.is_link_local
+                or ip.is_multicast or ip.is_reserved or ip.is_unspecified):
+            return False
+    return True
+
+
 def nexus_request(nexus_url, path, data=None):
     """HTTP(S)-Request an ShinNexus. Gibt (status_code, response_dict) zurück."""
     import urllib.request, urllib.error, ssl
+    from urllib.parse import urlparse
+    parsed = urlparse((nexus_url or '').rstrip('/'))
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+        return 400, {"error": "Ungültige Nexus-URL"}
+    klasse, err = _classify_connection(nexus_url)
+    if klasse == 'REJECTED':
+        return 400, {"error": f"Nexus-URL nicht erlaubt: {err}"}
+    if not _is_safe_outbound_host(parsed.hostname):
+        return 400, {"error": "Nexus-URL zeigt auf interne oder reservierte Adresse"}
     full_url = f"{nexus_url.rstrip('/')}{path}"
     headers = {"Accept": "application/json"}
     body = None
@@ -2285,12 +2370,12 @@ def nexus_request(nexus_url, path, data=None):
         headers["Content-Type"] = "application/json; charset=utf-8"
         body = json.dumps(data).encode("utf-8")
     req = urllib.request.Request(full_url, data=body, headers=headers)
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    ctx = _make_ssl_context(klasse)
     try:
         with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
             return resp.status, json.loads(resp.read().decode("utf-8", errors="replace"))
+    except ssl.SSLError as e:
+        return 502, {"error": f"TLS-Cert nicht vertrauenswürdig: {e}"}
     except urllib.error.HTTPError as e:
         try:
             return e.code, json.loads(e.read().decode("utf-8", errors="replace"))
@@ -2871,16 +2956,41 @@ def blocklist_remove(username: str) -> bool:
     return False
 
 
-# --- PASSWORD HASHING ---
+# --- PASSWORD HASHING (Argon2id, sauberer Schnitt — Hasi 30.04.) ---
+# Format: "argon2id$<salt-hex>$<hash-hex>". Kein PBKDF2-Fallback. Alte PBKDF2-Hashes
+# werden bei Verifikation abgelehnt → User muss Passwort über Forgot-Flow neu setzen.
 def hash_pw(password):
-    salt = secrets.token_hex(16)
-    h = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100000)
-    return f"{salt}${h.hex()}"
+    salt = secrets.token_bytes(16)
+    h = hash_secret_raw(
+        secret=password.encode('utf-8'),
+        salt=salt,
+        time_cost=_ARGON2_TIME_COST,
+        memory_cost=_ARGON2_MEMORY_COST,
+        parallelism=_ARGON2_PARALLELISM,
+        hash_len=_ARGON2_HASH_LEN,
+        type=_Argon2Type.ID,
+    )
+    return f"argon2id${salt.hex()}${h.hex()}"
 
 def verify_pw(password, stored):
-    salt, h = stored.split('$')
-    check = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100000)
-    return hmac.compare_digest(check.hex(), h)
+    if not isinstance(stored, str) or not stored.startswith('argon2id$'):
+        return False  # Alte PBKDF2-Hashes werden abgelehnt — Passwort-Reset nötig.
+    try:
+        _prefix, salt_hex, h_hex = stored.split('$', 2)
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(h_hex)
+    except Exception:
+        return False
+    check = hash_secret_raw(
+        secret=password.encode('utf-8'),
+        salt=salt,
+        time_cost=_ARGON2_TIME_COST,
+        memory_cost=_ARGON2_MEMORY_COST,
+        parallelism=_ARGON2_PARALLELISM,
+        hash_len=_ARGON2_HASH_LEN,
+        type=_Argon2Type.ID,
+    )
+    return hmac.compare_digest(check, expected)
 
 # --- EMAIL VERIFICATION ---
 def generate_verify_token():
@@ -3642,16 +3752,20 @@ def _restart_frps(config, frps_bin):
 
 
 def _update_frps_token(new_token):
-    """FRP auth.token in frps.toml updaten und frps neustarten."""
-    config, frps_bin = _find_frps_config()
+    """FRP auth.token in frps.toml schreiben.
+
+    Restart wird NICHT mehr automatisch versucht — der server.py kann frps unter
+    systemd nicht ohne sudo neu starten, und Audit-Welle entfernte den sudoers-Block.
+    Stattdessen: Token wird in frps.toml geschrieben, und der Owner muss am VPS
+    bash FRP-Refresh.sh ausführen (interaktive sudo-Abfrage). Sauberer Schnitt.
+    """
+    config, _frps_bin = _find_frps_config()
     if not config:
         log.warning('📡 frps Config nicht gefunden — Token nur lokal gespeichert')
         return False
     try:
-        # Config lesen
         with open(config) as f:
             content = f.read()
-        # auth.token ersetzen
         import re as _re
         new_content = _re.sub(r'auth\.token\s*=\s*"[^"]*"', f'auth.token = "{new_token}"', content)
         if new_content == content:
@@ -3659,17 +3773,13 @@ def _update_frps_token(new_token):
             return False
         with open(config, 'w') as f:
             f.write(new_content)
-        # Verifizieren dass es geschrieben wurde
         with open(config) as f:
             verify = f.read()
         if new_token not in verify:
             log.error('📡 Token wurde nicht korrekt in frps.toml geschrieben!')
             return False
-        # frps neustarten
-        ok = _restart_frps(config, frps_bin)
-        if ok:
-            log.info(f'📡 FRP Token aktualisiert — alle Tunnel gekappt, frps neu')
-        return ok
+        log.info('📡 FRP Token in frps.toml geschrieben — am VPS bash FRP-Refresh.sh ausführen für Restart!')
+        return True
     except Exception as e:
         log.error(f'📡 FRP Token-Update fehlgeschlagen: {e}')
         return False
@@ -6103,9 +6213,20 @@ def handle_chat_file(user_id, data):
         return {'error': 'Max 5MB!'}
 
     # Temporär speichern (1h, wie Voice)
+    # Audit-Fix 2026-04-30: Endung strikt validieren (nur a-z A-Z 0-9, max 8) +
+    # Final-Path-Check gegen VOICE_DIR — verhindert Path-Traversal über filename.
     file_id = str(uuid.uuid4())[:8]
-    ext = filename.rsplit('.', 1)[-1] if '.' in filename else 'bin'
+    raw_ext = filename.rsplit('.', 1)[-1] if '.' in filename else 'bin'
+    ext = raw_ext if re.match(r'^[A-Za-z0-9]{1,8}$', raw_ext) else 'bin'
     file_path = os.path.join(VOICE_DIR, f'chat_{file_id}.{ext}')
+    # Defensiv: nach dem Bauen prüfen dass der finale Pfad wirklich innerhalb VOICE_DIR liegt.
+    try:
+        _voice_root = os.path.realpath(VOICE_DIR)
+        _final_path = os.path.realpath(file_path)
+        if not (_final_path == _voice_root or _final_path.startswith(_voice_root + os.sep)):
+            return {'error': 'Pfad ungültig'}
+    except Exception:
+        return {'error': 'Pfad ungültig'}
     with open(file_path, 'wb') as f:
         f.write(raw)
 
@@ -7440,12 +7561,20 @@ def handle_resend_verify(data):
 def handle_verify(token):
     conn = get_db('accounts.db')
     c = conn.cursor()
-    user = c.execute('SELECT id, name FROM users WHERE verify_token = ?', (token,)).fetchone()
+    user = c.execute('SELECT id, name, verify_expires FROM users WHERE verify_token = ?', (token,)).fetchone()
     if not user:
         conn.close()
-        return {'error': 'Ungültiger Verifizierungs-Token'}
+        return {'error': 'Ungültiger Verifizierungs-Token', 'failed': True}
 
-    c.execute('UPDATE users SET verified = 1, verify_token = NULL, updated_at = ? WHERE id = ?',
+    # Audit-Fix 2026-04-30: 10-Minuten-Timer auf den 6er-Code (Hasi-Diktat).
+    # verify_expires wird beim Registrieren/Resend gesetzt; 0/NULL = kein Timer = abgelaufen.
+    expires_raw = user['verify_expires']
+    expires = float(expires_raw) if expires_raw not in (None, '', 0) else 0.0
+    if expires <= 0 or time.time() > expires:
+        conn.close()
+        return {'error': 'Code abgelaufen — bitte neu anfordern.', 'failed': True}
+
+    c.execute('UPDATE users SET verified = 1, verify_token = NULL, verify_expires = 0, updated_at = ? WHERE id = ?',
               (time.time(), user['id']))
     conn.commit()
     conn.close()
@@ -7822,8 +7951,65 @@ class GameHandler(SimpleHTTPRequestHandler):
         return origin if origin in ALLOWED_ORIGINS else ALLOWED_ORIGINS[0]
 
     def _get_client_ip(self):
-        forwarded = self.headers.get('X-Forwarded-For', '')
-        return forwarded.split(',')[0].strip() if forwarded else self.client_address[0]
+        peer = self.client_address[0]
+        if peer in ('127.0.0.1', '::1'):
+            forwarded = self.headers.get('X-Forwarded-For', '')
+            if forwarded:
+                return forwarded.split(',')[0].strip()
+        return peer
+
+    # Allow-list für statisches Ausliefern via SimpleHTTPRequestHandler-Fallback.
+    # Verbotene Top-Verzeichnisse (db/vault/credentials/logs/...) werden NIE serviert.
+    _STATIC_ALLOWED_FILES = {
+        'index.html', 'gameplay.html', 'sw.js',
+        'manifest.json', 'achievements.json',
+        'anchor-kneipe.json', 'anchor-nexus.json',
+        'robots.txt', 'sitemap.xml', 'LICENSE',
+        'favicon.ico', 'kneipe.ico', 'intro.jpg',
+    }
+    _STATIC_ALLOWED_EXT_TOPLEVEL = {
+        '.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg',
+        '.mp3', '.ogg', '.wav', '.webm',
+        '.css',
+    }
+    _STATIC_ALLOWED_DIRS = {'badges', 'Themen', 'themen_json'}
+    _STATIC_ALLOWED_DIR_EXT = {
+        '.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg',
+        '.mp3', '.ogg', '.wav', '.webm',
+        '.css', '.js', '.html', '.md', '.json', '.txt',
+    }
+
+    def _is_static_allowed(self, url_path):
+        from urllib.parse import unquote
+        from pathlib import PurePosixPath
+        try:
+            p = unquote(url_path or '/')
+        except Exception:
+            return False
+        if '..' in p or '\x00' in p:
+            return False
+        # Nur GET-Pfade unter dem Web-Root, niemals absolute OS-Pfade.
+        rel = p.lstrip('/')
+        if not rel or rel.endswith('/'):
+            # Verzeichnis-Listings sind nie erlaubt.
+            return False
+        parts = PurePosixPath(rel).parts
+        if not parts:
+            return False
+        first = parts[0]
+        # Top-Level Datei
+        if len(parts) == 1:
+            if first in self._STATIC_ALLOWED_FILES:
+                return True
+            ext = PurePosixPath(first).suffix.lower()
+            if ext in self._STATIC_ALLOWED_EXT_TOPLEVEL:
+                return True
+            return False
+        # Unterordner: muss in Allow-Dirs liegen, Erweiterung im Allow-Set
+        if first not in self._STATIC_ALLOWED_DIRS:
+            return False
+        ext = PurePosixPath(parts[-1]).suffix.lower()
+        return ext in self._STATIC_ALLOWED_DIR_EXT
 
     def _is_windows_user(self):
         """Windows = permanenter Überwachungs-Flag. Windows ist Malware."""
@@ -8110,6 +8296,48 @@ class GameHandler(SimpleHTTPRequestHandler):
             })
             return
 
+        if path.path == '/api/tls-status':
+            # TLS-Architektur: Klassifikation einer URL (oder der gespeicherten public_url).
+            # Auth: Setup-Phase ODER eingeloggter Owner.
+            from urllib.parse import parse_qs as _pq
+            qs = _pq(path.query or '')
+            target_url = (qs.get('url', [''])[0] or '').strip().rstrip('/')
+            sess = self._get_session()
+            conn_ts = get_db('accounts.db')
+            owner_row_ts = conn_ts.execute('SELECT id, verified FROM users WHERE is_owner = 1 LIMIT 1').fetchone()
+            in_setup_ts = (owner_row_ts is None) or (not owner_row_ts['verified'])
+            is_owner_ts = False
+            if sess:
+                u_ts = conn_ts.execute('SELECT is_owner FROM users WHERE id = ?', (sess['user_id'],)).fetchone()
+                is_owner_ts = bool(u_ts and u_ts['is_owner'])
+            if not target_url:
+                pu_row = conn_ts.execute('SELECT value FROM config WHERE key = ?', ('public_url',)).fetchone()
+                target_url = (pu_row['value'] if pu_row and pu_row['value'] else '').strip().rstrip('/')
+            conn_ts.close()
+            if not (in_setup_ts or is_owner_ts):
+                self._json_response({'error': 'Nicht autorisiert'}, 403)
+                return
+            if not target_url:
+                self._json_response({'error': 'Keine URL konfiguriert'}, 400)
+                return
+            klasse, err = _classify_connection(target_url)
+            if klasse == 'DOMAIN_SECURE':
+                badge, tooltip, warning = '🔒', 'Verbindung verschlüsselt verifiziert', None
+            elif klasse == 'LAN_HTTP':
+                badge, tooltip, warning = '🏠', 'Lokales Netzwerk — kein TLS nötig', None
+            elif klasse == 'PUBLIC_IP_HTTP':
+                badge, tooltip, warning = '⚠', 'Public-IP ohne Domain — Daten gehen unverschlüsselt durchs Internet.', 'unverschlüsselt'
+            else:
+                badge, tooltip, warning = '❌', err or 'URL abgelehnt', err
+            self._json_response({
+                'url': target_url,
+                'klasse': klasse,
+                'badge': badge,
+                'tooltip': tooltip,
+                'warning': warning,
+            })
+            return
+
         if path.path == '/api/status':
             os_flag = self._get_os_flag()
             owner_verified = False
@@ -8229,7 +8457,12 @@ class GameHandler(SimpleHTTPRequestHandler):
             self.wfile.write(card_data)
         elif path.path.startswith('/share/'):
             # Standalone Share-Seite: zeigt NUR das Card-Bild
-            username = path.path.split('/')[-1]
+            import html as _html_mod, re as _re_share
+            username_raw = path.path.split('/')[-1]
+            if not _re_share.match(r'^[A-Za-z0-9]{3,12}$', username_raw):
+                self.send_error(404, 'Not Found')
+                return
+            username = _html_mod.escape(username_raw, quote=True)
             html = f'''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
             <title>{username} — Kneipen-Schlägerei</title>
             <meta property="og:image" content="https://bar.shinpai.de/api/share-card/{username}">
@@ -8369,7 +8602,11 @@ class GameHandler(SimpleHTTPRequestHandler):
             if not sess:
                 self._json_response({'error': 'Nicht eingeloggt'}, 401); return
             params = parse_qs(path.query)
-            since = float(params.get('since', ['0'])[0])
+            try:
+                since = float(params.get('since', ['0'])[0])
+            except (ValueError, TypeError):
+                self._json_response({'error': 'Ungültiger since-Parameter — Unix-Epoch (Float) erforderlich'}, 400)
+                return
             res = handle_tresen_stream(sess['user_id'], since)
             if isinstance(res, dict) and '_status' in res:
                 status = res.pop('_status')
@@ -8390,7 +8627,11 @@ class GameHandler(SimpleHTTPRequestHandler):
                 self._json_response({'error': 'Nicht eingeloggt'}, 401)
                 return
             params = parse_qs(path.query)
-            since = float(params.get('since', ['0'])[0])
+            try:
+                since = float(params.get('since', ['0'])[0])
+            except (ValueError, TypeError):
+                self._json_response({'error': 'Ungültiger since-Parameter — Unix-Epoch (Float) erforderlich'}, 400)
+                return
             res = handle_durchsage_stream(sess['user_id'], since)
             if isinstance(res, dict) and '_status' in res:
                 status = res.pop('_status')
@@ -8455,7 +8696,11 @@ class GameHandler(SimpleHTTPRequestHandler):
             parts = path.path.split('/')
             tisch_id = parts[-1] if len(parts) > 4 else ''
             params = parse_qs(path.query)
-            since = float(params.get('since', ['0'])[0])
+            try:
+                since = float(params.get('since', ['0'])[0])
+            except (ValueError, TypeError):
+                self._json_response({'error': 'Ungültiger since-Parameter — Unix-Epoch (Float) erforderlich'}, 400)
+                return
             result = handle_chat_poll(sess['user_id'], tisch_id, since)
             # Error-Objekt mit _status = HTTP-Statuscode rauswerfen
             if isinstance(result, dict) and '_status' in result:
@@ -8625,6 +8870,10 @@ class GameHandler(SimpleHTTPRequestHandler):
             conn.close()
             self._json_response({'api_key': user['api_key'] if user else ''})
         elif path.path == '/api/verify':
+            ip = self._get_client_ip()
+            if verify_is_locked(ip):
+                self._json_response({'error': 'Zu viele Fehlversuche — 5 Minuten Pause.'}, 429)
+                return
             params = parse_qs(path.query)
             token = params.get('token', [''])[0]
             result = handle_verify(token)
@@ -8634,8 +8883,20 @@ class GameHandler(SimpleHTTPRequestHandler):
                 self.send_header('Location', '/?verified=1')
                 self.end_headers()
             else:
+                if result.get('failed'):
+                    verify_record_fail(ip)
+                # 'failed'-Flag aus User-facing Response entfernen
+                result.pop('failed', None)
                 self._json_response(result)
         else:
+            # Root-Pfad → index.html ausliefern (kein Dir-Listing)
+            if path.path == '/':
+                self.path = '/index.html'
+                super().do_GET()
+                return
+            if not self._is_static_allowed(path.path):
+                self.send_error(404, 'Not Found')
+                return
             super().do_GET()
 
     def do_POST(self):
@@ -8919,6 +9180,19 @@ class GameHandler(SimpleHTTPRequestHandler):
         elif path == '/api/public-url/check':
             # Manueller "Jetzt prüfen"-Button ODER Setup-Check.
             # Body: {url?: explizite Domain testen}. Ohne url → Full-Check (ipify + Self-Test)
+            # Auth: Setup-Phase ODER eingeloggter Owner.
+            sess = self._get_session()
+            conn_pc = get_db('accounts.db')
+            owner_row_pc = conn_pc.execute('SELECT id, verified FROM users WHERE is_owner = 1 LIMIT 1').fetchone()
+            in_setup_pc = (owner_row_pc is None) or (not owner_row_pc['verified'])
+            is_owner_pc = False
+            if sess:
+                u_pc = conn_pc.execute('SELECT is_owner FROM users WHERE id = ?', (sess['user_id'],)).fetchone()
+                is_owner_pc = bool(u_pc and u_pc['is_owner'])
+            conn_pc.close()
+            if not (in_setup_pc or is_owner_pc):
+                self._json_response({'error': 'Nicht autorisiert'}, 403)
+                return
             target_url = (data.get('url') or '').strip().rstrip('/')
             if target_url:
                 if not (target_url.startswith('http://') or target_url.startswith('https://')):
@@ -8951,12 +9225,24 @@ class GameHandler(SimpleHTTPRequestHandler):
                     },
                 })
         elif path == '/api/public-url/save':
-            # Nach erfolgreichem Check: URL in config persistieren
+            # Nach erfolgreichem Check: URL in config persistieren.
+            # Auth: Setup-Phase ODER eingeloggter Owner.
             url = (data.get('url') or '').strip().rstrip('/')
             if not url:
                 self._json_response({'error': 'URL fehlt'}, 400)
                 return
+            sess = self._get_session()
             conn = get_db('accounts.db')
+            owner_row = conn.execute('SELECT id, verified FROM users WHERE is_owner = 1 LIMIT 1').fetchone()
+            in_setup = (owner_row is None) or (not owner_row['verified'])
+            is_owner = False
+            if sess:
+                u = conn.execute('SELECT is_owner FROM users WHERE id = ?', (sess['user_id'],)).fetchone()
+                is_owner = bool(u and u['is_owner'])
+            if not (in_setup or is_owner):
+                conn.close()
+                self._json_response({'error': 'Nicht autorisiert'}, 403)
+                return
             conn.execute('INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)', ('public_url', url))
             conn.execute('INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)', ('solo_mode', '0'))
             conn.commit()
@@ -8987,9 +9273,20 @@ class GameHandler(SimpleHTTPRequestHandler):
             log.info(f'🌐 Watchdog-Config: enabled={enabled}, interval={interval}s')
             self._json_response({'ok': True, 'autocheck_enabled': enabled == '1', 'autocheck_interval_sec': interval})
         elif path == '/api/solo-mode':
-            # SMTP überspringen, Owner auto-verified, nur Gäste-Modus aktiv
+            # SMTP überspringen, Owner auto-verified, nur Gäste-Modus aktiv.
+            # Auth: Setup-Phase (kein verifizierter Owner) ODER eingeloggter Owner.
             sess = self._get_session()
             conn = get_db('accounts.db')
+            owner_row = conn.execute('SELECT id, verified FROM users WHERE is_owner = 1 LIMIT 1').fetchone()
+            in_setup = (owner_row is None) or (not owner_row['verified'])
+            is_owner = False
+            if sess:
+                u = conn.execute('SELECT is_owner FROM users WHERE id = ?', (sess['user_id'],)).fetchone()
+                is_owner = bool(u and u['is_owner'])
+            if not (in_setup or is_owner):
+                conn.close()
+                self._json_response({'error': 'Nicht autorisiert'}, 403)
+                return
             conn.execute('INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)', ('solo_mode', '1'))
             conn.execute('INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)', ('public_url', ''))
             # Owner auto-verify (keine Mail möglich/nötig)
@@ -9397,13 +9694,19 @@ class GameHandler(SimpleHTTPRequestHandler):
             nx_token = login_res.get('session_token', '')
             # Delete aufrufen mit Session
             import urllib.request, urllib.error, ssl
+            _klasse_del, _err_del = _classify_connection(nx_url)
+            if _klasse_del == 'REJECTED':
+                self._json_response({'error': f'Nexus-URL nicht erlaubt: {_err_del}'}, 400)
+                return
             del_url = f"{nx_url.rstrip('/')}/api/auth/delete-account"
             del_body = json.dumps({'password': pw, 'totp_code': totp}).encode('utf-8')
             del_req = urllib.request.Request(del_url, data=del_body, headers={'Content-Type': 'application/json', 'X-Session-Token': nx_token})
-            ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+            ctx = _make_ssl_context(_klasse_del)
             try:
                 with urllib.request.urlopen(del_req, timeout=15, context=ctx) as resp:
                     del_res = json.loads(resp.read())
+            except ssl.SSLError as e:
+                del_res = {'error': f'TLS-Cert nicht vertrauenswürdig: {e}'}
             except urllib.error.HTTPError as e:
                 try: del_res = json.loads(e.read())
                 except: del_res = {'error': f'Nexus: {e.code}'}
@@ -9930,13 +10233,19 @@ class GameHandler(SimpleHTTPRequestHandler):
                 self._json_response({'error': 'Nur der Owner darf Themen löschen'}, 403)
                 return
             theme_id = data.get('theme_id', '')
-            # MD löschen
-            md_path = os.path.join(BASE, 'Themen', f'{theme_id}.md')
-            if os.path.exists(md_path):
+            import re as _re_td
+            if not _re_td.match(r'^[A-Za-z0-9_\-]+$', theme_id):
+                self._json_response({'error': 'Ungültige theme_id'}, 400)
+                return
+            themen_dir_md = os.path.realpath(os.path.join(BASE, 'Themen'))
+            themen_dir_js = os.path.realpath(THEMEN_DIR)
+            # MD löschen — Pfad muss innerhalb Themen/ bleiben
+            md_path = os.path.realpath(os.path.join(BASE, 'Themen', f'{theme_id}.md'))
+            if md_path.startswith(themen_dir_md + os.sep) and os.path.exists(md_path):
                 os.remove(md_path)
-            # JSON löschen
-            json_path = os.path.join(THEMEN_DIR, f'{theme_id}.json')
-            if os.path.exists(json_path):
+            # JSON löschen — Pfad muss innerhalb THEMEN_DIR bleiben
+            json_path = os.path.realpath(os.path.join(THEMEN_DIR, f'{theme_id}.json'))
+            if json_path.startswith(themen_dir_js + os.sep) and os.path.exists(json_path):
                 os.remove(json_path)
             # Aus community_themes löschen falls vorhanden
             conn = get_db('gameplay.db')
@@ -10269,8 +10578,16 @@ class GameHandler(SimpleHTTPRequestHandler):
             params = []
             if 'profile_pic' in data:
                 pic = data['profile_pic']
-                # Base64-Bilder serverseitig auf 256x256 resizen
-                if isinstance(pic, str) and pic.startswith('data:image'):
+                # XSS-Hardening 2026-04-30: profile_pic darf nur sein:
+                # (a) data:image/(png|jpeg|webp);base64,... → PIL-Roundtrip nach jpeg
+                # (b) einzelnes Emoji (max 4 Zeichen, keine HTML-Sonderzeichen)
+                # (c) leerer String
+                if not isinstance(pic, str):
+                    self._json_response({'error': 'Profilbild ungültig'}, 400)
+                    return
+                if pic == '':
+                    pass  # leeren String akzeptieren
+                elif pic.startswith('data:image'):
                     try:
                         b64data = pic.split(',')[1]
                         img_bytes = base64.b64decode(b64data)
@@ -10282,6 +10599,15 @@ class GameHandler(SimpleHTTPRequestHandler):
                     except Exception as e:
                         log.warning(f'⚠️ Profilbild-Resize fehlgeschlagen: {e}')
                         self._json_response({'error': 'Ungültiges Bild'}, 400)
+                        return
+                    # Defense-in-Depth: strikte Regex auf das was wir gleich speichern
+                    if not re.match(r'^data:image/jpeg;base64,[A-Za-z0-9+/=]+$', pic):
+                        self._json_response({'error': 'Profilbild ungültig'}, 400)
+                        return
+                else:
+                    # Emoji-Variante: max 4 Zeichen, keine HTML-Sonderzeichen
+                    if len(pic) > 4 or any(c in pic for c in '<>&"\'/\\'):
+                        self._json_response({'error': 'Profilbild: nur Bild-Upload oder einzelnes Emoji'}, 400)
                         return
                 updates.append('profile_pic = ?')
                 params.append(pic)

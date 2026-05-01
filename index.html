@@ -458,6 +458,13 @@ body { background: #0a0a0a; color: #e0d8c8; font-family: 'Georgia', serif; min-h
     <div id="login-share-banner" style="display:none;max-width:420px;margin:8px auto;font-size:12px;color:#887755;text-align:center;">
       <div style="margin-bottom:3px;font-style:italic;">Deine Kneipen-Adresse:</div>
       <div style="display:flex;gap:6px;align-items:center;justify-content:center;">
+        <span id="login-share-warn" title="Public-IP ohne Domain — Daten gehen unverschlüsselt durchs Internet." style="display:none;color:#d4a850;align-items:center;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+            <line x1="12" y1="9" x2="12" y2="13"></line>
+            <line x1="12" y1="17" x2="12.01" y2="17"></line>
+          </svg>
+        </span>
         <span id="login-share-url" style="font-family:monospace;color:#d4a850;font-size:13px;letter-spacing:0.3px;"></span>
         <button id="btn-copy-login-share" title="Kopieren" style="background:transparent;border:0;color:#d4a850;cursor:pointer;padding:2px 4px;display:inline-flex;align-items:center;">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -573,6 +580,13 @@ body { background: #0a0a0a; color: #e0d8c8; font-family: 'Georgia', serif; min-h
   <div id="share-banner" style="display:none;max-width:420px;margin:8px auto;font-size:12px;color:#887755;text-align:center;">
     <div style="margin-bottom:3px;font-style:italic;">Deine Kneipen-Adresse:</div>
     <div style="display:flex;gap:6px;align-items:center;justify-content:center;">
+      <span id="share-warn" title="Public-IP ohne Domain — Daten gehen unverschlüsselt durchs Internet." style="display:none;color:#d4a850;align-items:center;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+          <line x1="12" y1="9" x2="12" y2="13"></line>
+          <line x1="12" y1="17" x2="12.01" y2="17"></line>
+        </svg>
+      </span>
       <span id="share-url" style="font-family:monospace;color:#d4a850;font-size:13px;letter-spacing:0.3px;"></span>
       <button id="btn-copy-share" title="Kopieren" style="background:transparent;border:0;color:#d4a850;cursor:pointer;padding:2px 4px;display:inline-flex;align-items:center;">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1586,6 +1600,16 @@ fetch(API + '/api/status', {method:'POST',headers:{'Content-Type':'application/j
 
 // --- XSS ESCAPE ---
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+// XSS-Hardening 2026-04-30: profile_pic kommt vom Server als data:image/jpeg;base64,... (PIL-Roundtrip).
+// Diese Funktion akzeptiert NUR diese strenge Form. Alles andere gilt als kein-Bild → Fallback (Emoji/Initial).
+function _safeAvatarSrc(pic) {
+  if (!pic || typeof pic !== 'string') return null;
+  return /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(pic) ? pic : null;
+}
+function _safeFileUrl(url) {
+  if (!url || typeof url !== 'string') return null;
+  return /^\/api\/chat-file\/[A-Za-z0-9]+\.[A-Za-z0-9]+$/.test(url) ? url : null;
+}
 
 // --- API HELPER ---
 async function api(path, method='GET', body=null) {
@@ -1608,10 +1632,40 @@ function showScreen(id) {
     _stopMicTest();
   }
 }
+function _classifyUrl(url) {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return 'REJECTED';
+    let host = u.hostname.replace(/^\[|\]$/g, '');
+    if (host === 'localhost') return 'LAN_HTTP';
+    const isIP4 = /^(\d{1,3}\.){3}\d{1,3}$/.test(host);
+    const isIP6 = host.indexOf(':') !== -1;
+    if (isIP4) {
+      if (u.protocol !== 'http:') return 'REJECTED';
+      const p = host.split('.').map(n => parseInt(n,10));
+      if (p[0] === 127) return 'LAN_HTTP';
+      if (p[0] === 10) return 'LAN_HTTP';
+      if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return 'LAN_HTTP';
+      if (p[0] === 192 && p[1] === 168) return 'LAN_HTTP';
+      if (p[0] === 169 && p[1] === 254) return 'LAN_HTTP';
+      return 'PUBLIC_IP_HTTP';
+    }
+    if (isIP6) {
+      const lo = host.toLowerCase();
+      if (lo === '::1' || lo.startsWith('fe80') || lo.startsWith('fc') || lo.startsWith('fd')) return 'LAN_HTTP';
+      if (u.protocol !== 'http:') return 'REJECTED';
+      return 'PUBLIC_IP_HTTP';
+    }
+    if (u.protocol !== 'https:') return 'REJECTED';
+    return 'DOMAIN_SECURE';
+  } catch (e) { return 'REJECTED'; }
+}
+
 async function updateLoginBanner() {
   const banner = document.getElementById('login-share-banner');
   const urlEl = document.getElementById('login-share-url');
   const hintEl = document.getElementById('login-share-hint');
+  const warnEl = document.getElementById('login-share-warn');
   if (!banner || !urlEl) return;
   try {
     const r = await fetch('/api/public-url/status');
@@ -1633,6 +1687,7 @@ async function updateLoginBanner() {
     banner.style.display = 'block';
     urlEl.textContent = url;
     if (hintEl) hintEl.textContent = hint;
+    if (warnEl) warnEl.style.display = (_classifyUrl(url) === 'PUBLIC_IP_HTTP') ? 'inline-flex' : 'none';
   } catch(e) { banner.style.display = 'none'; }
 }
 // Login-Banner Copy-Button
@@ -1934,6 +1989,8 @@ async function updateShareBanner() {
     urlEl.textContent = url;
     urlEl.dataset.url = url;
     hintEl.textContent = hint;
+    const warnEl = document.getElementById('share-warn');
+    if (warnEl) warnEl.style.display = (_classifyUrl(url) === 'PUBLIC_IP_HTTP') ? 'inline-flex' : 'none';
   } catch (e) {}
 }
 
@@ -2808,11 +2865,26 @@ const _sessionVoiceQueue = {
 
   _playNext() {
     if (this.playing || this.paused) return;
-    if (this.items.length === 0 || _chatMuted) { this.playing = null; return; }
+    if (this.items.length === 0 || _chatMuted) {
+      this.playing = null;
+      // Queue komplett leer → Mic wieder freigeben.
+      if (_voiceStream) {
+        try { _voiceStream.getAudioTracks().forEach(t => { t.enabled = true; }); } catch(_) {}
+      }
+      return;
+    }
     const url = this.items.shift();
     this.playing = url;
 
     if (_audioMode === 'speaker') _ttsPlaying = true;
+
+    // Mic während Player-Track komplett muten (Hardware-Level), damit kein
+    // Echo zurückkommt und kein Phantom-Trigger auf den eigenen Lautsprecher.
+    // Wir setzen es bei JEDEM Track erneut, damit es zwischen Tracks nie
+    // unbeabsichtigt auf An hängenbleibt.
+    if (_voiceStream) {
+      try { _voiceStream.getAudioTracks().forEach(t => { t.enabled = false; }); } catch(_) {}
+    }
 
     // Neues Audio-Element pro Track (fixt onended-Bug auf Windows)
     const audio = new Audio(url);
@@ -2822,6 +2894,9 @@ const _sessionVoiceQueue = {
     const finish = () => {
       if (_handled) return; _handled = true;
       _ttsPlaying = false;
+      // Mic NICHT hier re-enablen — sonst öffnet sich die Lücke zwischen
+      // zwei aufeinanderfolgenden Tracks. _playNext re-enabled das Mic wenn
+      // die Queue endgültig leer ist.
       _voiceChunks = [];
       this.playing = null;
       this._currentAudio = null;
@@ -3171,7 +3246,9 @@ function _vadLoop() {
 
   if (avg > _micThreshold) {
     _vadSilenceSince = 0;
-    if (!_vadIsLoud && !queueActive) {
+    // Recorder auch starten wenn Queue aktiv ist — Player wird gleichzeitig
+    // pausiert. So gehen Hasi-Worte während laufendem Player nicht verloren.
+    if (!_vadIsLoud) {
       _vadIsLoud = true;
       _sessionVoiceQueue.pause(); // Queue pausieren wenn User spricht
       _voiceChunks = [];
@@ -3402,9 +3479,10 @@ async function pollChat() {
         const ownerBadge = m.is_owner && !m.via_durchsage ? ' 👑' : '';
         const title = muted ? 'Unmute' : 'Mute';
         const viaText = m.via_durchsage ? ' · VIA DURCHSAGE' : (m.is_owner ? ' · OWNER' : '');
-        return `<div style="display:flex;flex-direction:column;align-items:center;cursor:pointer;opacity:${opacity};padding:2px 0;" onclick="toggleMuteUser('${m.name}')" title="${title} ${m.name} (Platz ${m.rank})${viaText}">
-          <div style="position:relative;width:32px;height:32px;border-radius:50%;background:#1a1610;border:2px solid ${border};${nxGlow}display:flex;align-items:center;justify-content:center;font-size:13px;overflow:visible;" class="${vLvl >= 3 ? 'rainbow-ring' : ''}">${m.profile_pic && m.profile_pic.startsWith('data:') ? '<img src="'+m.profile_pic+'" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">' : m.name[0].toUpperCase()}${shieldBadge}${durchsageBadge}</div>
-          <div style="font-size:7px;color:#887755;max-width:52px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center;">${rankIcon}${m.name}${ownerBadge}</div>
+        const _safePic1 = _safeAvatarSrc(m.profile_pic);
+        return `<div style="display:flex;flex-direction:column;align-items:center;cursor:pointer;opacity:${opacity};padding:2px 0;" onclick="toggleMuteUser('${esc(m.name)}')" title="${esc(title + ' ' + m.name + ' (Platz ' + m.rank + ')' + viaText)}">
+          <div style="position:relative;width:32px;height:32px;border-radius:50%;background:#1a1610;border:2px solid ${border};${nxGlow}display:flex;align-items:center;justify-content:center;font-size:13px;overflow:visible;" class="${vLvl >= 3 ? 'rainbow-ring' : ''}">${_safePic1 ? '<img src="'+_safePic1+'" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">' : esc((m.name || '?')[0].toUpperCase())}${shieldBadge}${durchsageBadge}</div>
+          <div style="font-size:7px;color:#887755;max-width:52px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center;">${rankIcon}${esc(m.name)}${ownerBadge}</div>
         </div>`;
       }).join('');
     }
@@ -3445,11 +3523,13 @@ async function pollChat() {
       const timeStr = new Date(m.time * 1000).toLocaleTimeString('de-DE', {hour:'2-digit', minute:'2-digit'});
       let contentHtml = `<div class="msg-text" style="white-space:pre-wrap;">${esc(m.text)}</div>`;
       // Datei-Anhang (NICHT audio — audio geht in den Voice-Player!)
-      if (m.file_url && m.filetype) {
+      // XSS-Hardening 2026-04-30: file_url muss strikt zu /api/chat-file/<id>.<ext> matchen
+      const _safeFile = _safeFileUrl(m.file_url);
+      if (_safeFile && m.filetype) {
         if (m.filetype.startsWith('image/')) {
-          contentHtml += `<img src="${m.file_url}" style="max-width:200px;border-radius:6px;margin-top:4px;cursor:pointer;" onclick="window.open('${m.file_url}','_blank')">`;
+          contentHtml += `<img src="${_safeFile}" style="max-width:200px;border-radius:6px;margin-top:4px;cursor:pointer;" onclick="window.open('${_safeFile}','_blank')">`;
         } else if (!m.filetype.startsWith('audio/')) {
-          contentHtml += `<a href="${m.file_url}" target="_blank" style="color:#d4a850;font-size:11px;display:block;margin-top:4px;">📎 ${esc(m.filename || 'Datei')}</a>`;
+          contentHtml += `<a href="${_safeFile}" target="_blank" style="color:#d4a850;font-size:11px;display:block;margin-top:4px;">📎 ${esc(m.filename || 'Datei')}</a>`;
         }
       }
       // EIN Voice-Player: Original-Voice ODER TTS — nie beides!
@@ -3962,9 +4042,10 @@ async function loadTeilnehmer() {
     const row = document.createElement('div');
     row.className = 'tn-row';
     row.style.cursor = 'pointer';
-    const avatarHtml = t.profile_pic && t.profile_pic.startsWith('data:')
-      ? `<img src="${t.profile_pic}">`
-      : (t.profile_pic || '👤');
+    const _safePicTn = _safeAvatarSrc(t.profile_pic);
+    const avatarHtml = _safePicTn
+      ? `<img src="${_safePicTn}">`
+      : esc(t.profile_pic || '👤');
     row.innerHTML = `
       <div class="tn-rank ${rankClass}">${rankDisplay}</div>
       <div class="tn-avatar">${avatarHtml}</div>
@@ -4129,10 +4210,17 @@ document.getElementById('btn-profile').onclick = async () => {
   // Share Card laden
   document.getElementById('prof-share-card').src = `/api/share-card/${data.name}?t=${Date.now()}`;
 
-  // Avatar anzeigen
+  // Avatar anzeigen — DOM-API statt innerHTML (XSS-Hardening 2026-04-30)
   const avatarEl = document.getElementById('prof-avatar');
-  if (data.profile_pic && data.profile_pic.startsWith('data:')) {
-    avatarEl.innerHTML = `<img src="${data.profile_pic}" style="width:100%;height:100%;object-fit:cover;">`;
+  avatarEl.textContent = '';
+  const _safePicProf = _safeAvatarSrc(data.profile_pic);
+  if (_safePicProf) {
+    const _img = document.createElement('img');
+    _img.src = _safePicProf;
+    _img.style.width = '100%';
+    _img.style.height = '100%';
+    _img.style.objectFit = 'cover';
+    avatarEl.appendChild(_img);
   } else if (data.profile_pic) {
     avatarEl.textContent = data.profile_pic; // Emoji
   } else {
@@ -6247,7 +6335,7 @@ document.getElementById('btn-btc-anchor-confirm').onclick = async () => {
   prog.style.display = '';
   const msg = document.getElementById('btc-anchor-msg');
   msg.style.color = '#d4a850'; msg.textContent = '⏳ Sende TX...';
-  const r = await api('/api/btc/anchor', 'POST', {version: VERSION || '1.5.0'});
+  const r = await api('/api/btc/anchor', 'POST', {version: VERSION || '2.0.0'});
   if (r.error) { msg.style.color = '#f44'; msg.textContent = '❌ ' + r.error; prog.style.display = 'none'; return; }
   msg.innerHTML = `✅ TX gesendet: <a href="https://mempool.space/tx/${r.txid}" target="_blank" style="color:#7ab8e0;">${r.txid.substring(0,16)}…</a>`;
   let secs = 0;
@@ -6351,7 +6439,7 @@ function startRevokePollResume() {
 }
 
 // VERSION für JS verfügbar machen
-const VERSION = '1.5.0';
+const VERSION = '2.0.0';
 
 // ══════════════════════════════════════════════════════════════
 //  🦋 WHITELIST TAB — JavaScript (kopiert von ShinNexus)

@@ -135,22 +135,31 @@ class KneipeClient {
     _throwIfError(r.data);
   }
 
-  Future<void> sendVoice(
+  Future<Map<String, dynamic>?> sendVoice(
     String tischId,
     Uint8List audioBytes, {
     String filename = 'Voice',
     String filetype = 'audio/webm',
+    String text = '',
   }) async {
     final dataUrl = 'data:$filetype;base64,${base64Encode(audioBytes)}';
+    // voice_input: true unterdrückt server-seitige TTS-Generierung — kein Echo.
+    // text: optional vom client-seitigen Whisper transkribiert.
     final r = await _dio.post(
       '/api/chat/send',
       data: {
         'tisch_id': tischId,
-        'text': '',
+        'text': text,
         'voice': dataUrl,
+        'voice_input': true,
       },
     );
     _throwIfError(r.data);
+    final data = r.data;
+    if (data is Map && data['msg'] is Map) {
+      return Map<String, dynamic>.from(data['msg'] as Map);
+    }
+    return null;
   }
 
   Future<Uint8List> fetchFile(String url) async {

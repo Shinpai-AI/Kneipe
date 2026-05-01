@@ -7,7 +7,7 @@
 <p align="center"><em>Seelenfick für die Kneipe.</em></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.5.0-d4a850" alt="Version">
+  <img src="https://img.shields.io/badge/version-2.0.0-d4a850" alt="Version">
   <img src="https://img.shields.io/badge/bitcoin-chain--of--trust-f59e0b" alt="Bitcoin Verified">
   <img src="https://img.shields.io/badge/crypto-ML--DSA--65%20%2B%20ML--KEM--768-d4a850" alt="PQ Crypto">
   <img src="https://img.shields.io/badge/license-AGPL--3.0-green" alt="License">
