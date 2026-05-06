@@ -1,10 +1,10 @@
 {
-  "version": "2.0.0",
-  "code_hash": "89d90ca1d11febabc4dd084ae4be1282b57b532b514df5f0df2487d426101c31",
-  "txid": "e0d380affaf0d8ca031e194d8d453d86eaa62cf9b1069e92e5132d403fc439d8",
+  "version": "2.0.6",
+  "code_hash": "0702cb2110e566c0cf7745deea777a89eda063166d10f7da113a3368500d23ef",
+  "txid": "794426fea6a6dfbfd5492c7592ec3c3e04b05c7d4b58027711bdd89e8f921691",
   "btc_address": "bc1qas36dxrk4xv2f55yz8gndz2wh0yt7hxs45p0v3",
-  "timestamp": 1777733690,
-  "op_return": "SHINPAI-AI:2.0.0:89d90ca1d11febabc4dd084ae4be1282",
+  "timestamp": 1778108893,
+  "op_return": "SHINPAI-AI:2.0.6:0702cb2110e566c0cf7745deea777a89",
   "company": "Shinpai-AI",
   "revoked": false,
   "history": [
@@ -193,6 +193,43 @@
       "status": "confirmed",
       "block_height": 947597,
       "confirmed_at": 1777741594
+    },
+    {
+      "txid": "58c05d4725c35a8f0a12c7a2c828249a09a4003d7ea05c33bc8356daeefd370f",
+      "code_hash": "ac1eb9994eeaae7f82ebdfc18e8d3060631fd913072f25babe3d9186e3ee6439",
+      "version": "0.5.5",
+      "app_name": "shinshare",
+      "timestamp": 1778022039,
+      "address": "bc1qas36dxrk4xv2f55yz8gndz2wh0yt7hxs45p0v3",
+      "op_return": "SHINPAI-AI:shinshare:0.5.5:ac1eb9994eeaae7f82ebdfc1",
+      "fee_sats": 150,
+      "status": "confirmed",
+      "block_height": 948091,
+      "confirmed_at": 1778024249
+    },
+    {
+      "txid": "584b8d0f976f186deaf0f37e833f4ebebb18c38507feaffb97cba8c9b74505e0",
+      "code_hash": "2d430b052c939ce5e8945dfb2c32b80dca8e285803ee49ef31931c7b42fbb4bb",
+      "version": "2.0.5",
+      "timestamp": 1778105018,
+      "address": "bc1qas36dxrk4xv2f55yz8gndz2wh0yt7hxs45p0v3",
+      "op_return": "SHINPAI-AI:2.0.5:2d430b052c939ce5e8945dfb2c32b80d",
+      "fee_sats": 150,
+      "status": "confirmed",
+      "block_height": 948224,
+      "confirmed_at": 1778107299
+    },
+    {
+      "txid": "794426fea6a6dfbfd5492c7592ec3c3e04b05c7d4b58027711bdd89e8f921691",
+      "code_hash": "0702cb2110e566c0cf7745deea777a89eda063166d10f7da113a3368500d23ef",
+      "version": "2.0.6",
+      "timestamp": 1778108893,
+      "address": "bc1qas36dxrk4xv2f55yz8gndz2wh0yt7hxs45p0v3",
+      "op_return": "SHINPAI-AI:2.0.6:0702cb2110e566c0cf7745deea777a89",
+      "fee_sats": 150,
+      "status": "confirmed",
+      "block_height": 948231,
+      "confirmed_at": 1778109247
     }
   ]
 }
